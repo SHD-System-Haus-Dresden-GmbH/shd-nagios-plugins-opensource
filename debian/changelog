@@ -1,0 +1,23 @@
+shd-nagios-plugins-opensource (0.4) 5; urgency=low
+
+  * added postinst and postrm
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Tue, 08 Apr 2014 11:28:55 +0200
+
+shd-nagios-plugins-opensource (0.3) 5; urgency=low
+
+  * dependencies
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Tue, 08 Apr 2014 10:45:54 +0200
+
+shd-nagios-plugins-opensource (0.2) 5; urgency=low
+
+  * First upload to unstable
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Mon, 07 Apr 2014 17:46:37 +0200
+
+shd-nagios-plugins-opensource (0.1) UNRELEASED; urgency=low
+
+  * Initial release. 
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Mon, 07 Apr 2014 13:14:43 +0200

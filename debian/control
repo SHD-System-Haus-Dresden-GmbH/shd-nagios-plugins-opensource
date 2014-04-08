@@ -1,0 +1,15 @@
+Source: shd-nagios-plugins-opensource
+Section: shd
+Priority: optional
+Maintainer: SM-Box Development Team <smbox-devel-team@shd-online.de>
+Build-Depends: debhelper (>= 5)
+X-Python-Version: >= 2.6
+Build-Depends-Indep: python2.6, python2.6-dev
+Standards-Version: 3.8.0
+
+Package: shd-nagios-plugins-opensource
+Architecture: any
+Conflicts: nagios2
+Depends: sudo, sshfs, cifs-utils, python-xenapi, python-nagiosplugin, python-argparse
+Description: SHD System-Haus-Dresden GmbH Open Source Nagios Plugins.
+
