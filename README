@@ -27,6 +27,6 @@ calling dpkg-buildpackage.
 
 Install with dpkg -i shd-nagios-plugins-opensource*
 
-Plugins will be in /usr/lib/nagios/plugins
-Command Definitions are in /etc/nagios/plugins
+Plugins: /usr/lib/nagios/plugins
+Command Definitions: /etc/nagios-plugins/config
 
