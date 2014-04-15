@@ -30,3 +30,4 @@ Install with dpkg -i shd-nagios-plugins-opensource*
 Plugins: /usr/lib/nagios/plugins
 Command Definitions: /etc/nagios-plugins/config
 
+to be continued..
