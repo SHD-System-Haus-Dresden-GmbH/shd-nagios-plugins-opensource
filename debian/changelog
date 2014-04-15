@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.6) 5; urgency=low
+
+  * modified dependencies
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Tue, 15 Apr 2014 10:14:31 +0200
+
 shd-nagios-plugins-opensource (0.5) 5; urgency=low
 
   * infrastructure

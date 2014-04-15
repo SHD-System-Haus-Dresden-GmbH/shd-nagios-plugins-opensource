@@ -10,6 +10,6 @@ Standards-Version: 3.8.0
 Package: shd-nagios-plugins-opensource
 Architecture: any
 Conflicts: nagios2
-Depends: sudo, sshfs, cifs-utils, python-xenapi, python-nagiosplugin, python-argparse
+Depends: python-xenapi, python-nagiosplugin, python-argparse
 Description: SHD System-Haus-Dresden GmbH Open Source Nagios Plugins.
 

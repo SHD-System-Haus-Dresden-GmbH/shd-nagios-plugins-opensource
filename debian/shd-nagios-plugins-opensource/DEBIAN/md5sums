@@ -1,6 +1,4 @@
-5ec7ffa477c9c9d434a7f59ab2aa401b  usr/lib/nagios/plugins/check_share_fuse_shd.py
 d1969a2ca3cbccc2a53a6bf1807c8ddf  usr/lib/nagios/plugins/check_xen_shd.py
-0de8a05ed313aadf0d183565eae5ca85  usr/share/doc/shd-nagios-plugins-opensource/changelog.gz
-d41d8cd98f00b204e9800998ecf8427e  usr/share/doc/shd-nagios-plugins-opensource/copyright
-7bc9de6dc1e5ec0a6aec9d661c378099  usr/share/nagios-plugins/templates-shd/check_share_fuse_shd.cfg
+e527e68dd62fbc74fa12552625dcfaae  usr/share/doc/shd-nagios-plugins-opensource/changelog.gz
+57fe42267786d9cf669832a0b7aa9248  usr/share/doc/shd-nagios-plugins-opensource/copyright
 2546b92a47f8abd68efe31bcb0c354fa  usr/share/nagios-plugins/templates-shd/check_xen_shd.cfg
