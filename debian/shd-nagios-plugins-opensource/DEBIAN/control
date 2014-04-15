@@ -1,9 +1,9 @@
 Package: shd-nagios-plugins-opensource
-Version: 0.5
+Version: 0.6
 Architecture: i386
 Maintainer: SM-Box Development Team <smbox-devel-team@shd-online.de>
 Installed-Size: 100
-Depends: sudo, sshfs, cifs-utils, python-xenapi, python-nagiosplugin, python-argparse
+Depends: python-xenapi, python-nagiosplugin, python-argparse
 Conflicts: nagios2
 Section: shd
 Priority: optional
