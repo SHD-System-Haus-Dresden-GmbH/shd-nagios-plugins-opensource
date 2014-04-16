@@ -1,22 +1,32 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# check_xen_shd.py
-# Plugin for monitoring xen 6 server.
-# 2014 SHD System-Haus-Dresden GmbH
-#  
-# check_xen_shd.py is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# check_xen_shd.py (tm) - An Open Source Nagios Plugin for
+# monitoring xen server 6.
 #
-# check_xen_shd.py is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+# Copyright (c) 2013 SHD System-Haus-Dresden GmbH
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or (at
+# your option) any later version.
+#
+# This program is provided "as is" according to the actual development 
+# without warranty of any kind. Either expressed or implied, including 
+# but not limited to the implied warranties of merchantability and/or 
+# fitness for a particular purpose. See the GNU
+# General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with Foobar.  If not, see <http://www.gnu.org/licenses/>. 
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301 USA.
+#
+# SHD System-Haus-Dresden GmbH can be contacted via web 
+# (http://www.systemmonitoring.de/kontakt) or via paper mail: 
+# SHD System-Haus-Dresden GmbH,
+# Drescherhäuser 5b, 
+# 01159 Dresden, Germany
 
 """
 
