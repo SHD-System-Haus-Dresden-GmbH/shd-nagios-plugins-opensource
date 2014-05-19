@@ -1,2 +1,1 @@
 plugins/* usr/lib/nagios/plugins
-nagiosconf/* usr/share/nagios-plugins/templates-shd
