@@ -1,4 +1,4 @@
-d1969a2ca3cbccc2a53a6bf1807c8ddf  usr/lib/nagios/plugins/check_xen_shd.py
-4fbcb6d342c3cd67daa8cddecbe0aed5  usr/share/doc/shd-nagios-plugins-opensource/changelog.gz
+46f730c0033c56a8df86447397ad8311  usr/lib/nagios/plugins/check_xen_shd.py
+61a7995ccee8caee51e9ae810843e128  usr/share/doc/shd-nagios-plugins-opensource/changelog.gz
 57fe42267786d9cf669832a0b7aa9248  usr/share/doc/shd-nagios-plugins-opensource/copyright
 2546b92a47f8abd68efe31bcb0c354fa  usr/share/nagios-plugins/templates-shd/check_xen_shd.cfg
