@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.9) 5; urgency=low
+
+  * rename
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Mon, 19 May 2014 17:31:37 +0200
+
 shd-nagios-plugins-opensource (0.8) 5; urgency=low
 
   * renamed plugin xen
