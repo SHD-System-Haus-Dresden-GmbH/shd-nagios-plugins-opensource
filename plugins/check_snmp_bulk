@@ -1,0 +1,463 @@
+#!/usr/bin/env python
+#
+# @author: David-Ansat Sonntag, Tobias Heinzmann
+# @copyright: 2010,2011 SHD- Systemhaus Dresden GmbH
+
+"""Checks resources via SNMP using OIDs"""
+
+__copyright__ = "Copyright 2008,2011 SHD GmbH"
+__version__ = "$Rev$"
+__maintainer__ = "SM-BOX-Development-Team -- SHD GmbH"
+__email__ = "smbox-devel-team@shd-online.de"
+
+
+import os
+import re
+import signal
+import sys
+
+from shdpynag import Simple as Plugin
+
+
+DEFAULT_COMMUNITY = 'public'
+DEFAULT_PLUGIN_TIMEOUT = 15
+
+
+def build_value_dict(oid, host, community, snmp_version='1'):
+    """Build value dictionary using last OID part as key."""
+    ph = os.popen("snmpwalk -Oen -v%s -c %s %s %s" % (snmp_version, community, host, oid))
+    prefix_len = len(oid + ".")
+    dict = {}
+    for line in ph:
+        fields = line.rstrip("\n").split(None, 3)
+        oid_ = fields[0][prefix_len:]     # the significant part of OID
+        if len(fields) == 4:              # value:
+            value = fields[3].strip('"')  #  set
+        else:
+            value = None                  #  unset
+        dict[oid_] = value
+    ph.close()
+    return dict
+
+def build_index_dict(oid, host, community):
+    """Build a value dict that uses the snmp index as key and value."""
+    snmp_result = build_value_dict(oid, host, community)
+    index_dict = {}
+    for k in snmp_result.keys():
+        index_dict[k] = k
+    return index_dict
+
+
+def signal_handler(signum, frame):
+    """Handle alarm signal."""
+    print "UNKNOWN : Plugin timed out"
+    sys.exit(np.errors['UNKNOWN'])
+
+
+def sortedDictKeys(adict):
+    keys = adict.keys()
+    keys.sort()
+    return [k for k in keys]
+
+
+def sortedDictValues(adict):
+    values = adict.values()
+    values.sort()
+    return [v for v in values]
+
+if __name__ == '__main__':
+    # Configure Nagios plugin
+    np = Plugin()
+    np.add_arg("C", "community", "SNMP community. Defaults to 'public' if omitted\n", required=False)
+    np.add_arg("L", "label-oid", "SNMP label OID\n", required=False)
+    np.add_arg("S", "state-oid", "SNMP state OID\n")
+    np.add_arg("R", "regex", "Enter a regular expression to match with result of state OID.\n"
+                "If the regex matches the check classifies this as OK.\n", required=False)
+    np.add_arg("F", "field-separator", "Field separator for all lists as in-/ exclude and information\n"
+                "OID list. Defaults to ','.  Can contain multiple characters\n" , required=False)
+    np.add_arg("I", "include", "Entries that are used for inspection only. All OIDs whose\n"
+                 "labels (-L|--label-oid) are not contained in this list are\n"
+                 "discarded.  Regular expressions supported. Field separator\n"
+                 "defaults to ',' unless changed with -F|--field-separator,\n"
+                 "e.g. -I 'eth\d{1}' would check all network interfaces named\n"
+                 "eth0-9.\n", required=False)
+    np.add_arg("E", "exclude", "Entries that get excluded of inspection. All\n"
+            "OIDs whose labels (-L|--label-oid) are contained in this list\n"
+            "are discarded.  Regular expressions supported. Field separator\n"
+            "defaults to ',' unless changed with -F|--field-separator,\n"
+            "e.g. -I 'COM\d+,A:,Z:' would exclude all 'COM0-9' devices as\n"
+            "device 'A:' and 'Z:'.\n", required=False)
+    np.add_arg("l", "list", "Lists all entries of label- and corresponding\n"
+            "state-OID.  Attention: This mode is for listing, not for\n"
+            "checking.\n", required=False, isFlag=True)
+    np.add_arg("o", "ok-label", "Label that gets printed when no alarm is\n"
+            "raised.\n", required=False)
+    np.add_arg("p", "perfdata", "If set, the plugin generates performance data\n"
+            "of the state OIDs values.\n", required=False, isFlag=True)
+    np.add_arg("u", "uom", "Units of measurement used in performance data.\n"
+            "Use only together with -p|-perfdata.\n", required=False)
+    np.add_arg("T", "tag", "If this parameter is defined, all monitored\n"
+            "instances get this string as additional name in output.\n",required=False)
+    np.add_arg("i", "info", "Informational OIDs are printed in output but not\n"
+            "used for alarm generatation and are not printed in performance data.\n"
+            "The number of informational OIDs is unlimited. Every OID needs a label.\n"
+            "The label:OID pairs are separated by kommas ',' (since changed with\n"
+            "-F|--field-separator): Label1&OID1,...,Labeln&OIDn. Label and OID are\n"
+            "separated by an ampersand (&) because it is considered unlikeley\n"
+            "that a label contains this character.\n",required=False)
+    np.add_arg("b", "breakLines", "Adds a HTML line-break in output after every instance.\n"
+            "This linebreaks are contained in notifications, too.\n", required=False, isFlag=True)
+    np.add_arg("t", "timeout", "Timeout in seconds. Defaults to " + str(DEFAULT_PLUGIN_TIMEOUT) + " if omitted.\n", required=False)
+    np.add_arg("w", "warning", "Warning threshold\n", required=False)
+    np.add_arg("c", "critical", "Critical threshold\n", required=False)
+    np.add_arg("v", "verbosity", "Verbosity of output. Three possible values:\n"
+            " 0 - Just string 'OK' or faulty instances in fault state\n"
+            " 1 - All instances in state OK, only faulty instances in fault state\n"
+            " 2 - All instances\n", required=False)
+    np.add_arg('x', 'snmp-index', "Instead of using -L|--label-oid the SNMP-Index can get\n"
+            "used for naming the found instances. The index is a poor\n"
+            "replacement for a name, but sometimes are just no -label-oids\n"
+            "available. Not to be used with -L|--label-oid.", required=False, isFlag=True)
+    np.add_arg("P", "snmp-version", "SNMP protocol version. Can be 1 or 2c",
+               required=False)
+
+    np.activate()
+
+    if not np['label-oid'] and not np['snmp-index']:
+        np.nagios_exit('UNKNOWN', 'Either -L|--label-oid or -x|--snmp-index is needed')
+
+    if np['label-oid'] and np['snmp-index']:
+        np.nagios_exit('UNKNOWN', 'Either -L|--label-oid or -x|--snmp-index is allowed')
+
+    # Set alarm
+    signal.signal(signal.SIGALRM, signal_handler)
+    if np['timeout']:
+        signal.alarm(int(np['timeout']))
+    else:
+        signal.alarm(DEFAULT_PLUGIN_TIMEOUT)
+
+    # Apply field separator to include/exclude list
+    if not np['field-separator']:
+        np['field-separator'] = ','
+
+    use_index    = False
+    include_list = []
+    exclude_list = []
+    warn_list    = []
+    crit_list    = []
+    ok_list      = []
+    info_list    = []
+    lineBreak    = " "
+    perfdata     = '|'
+    uom          = ''
+    optIncCount  = 0
+    incCount     = 0
+    info_dict    = {}
+    snmp_unavail_msg = 'Unable to gather information from SNMP server'
+    verbosity    = 0
+    overallState = 'UNKNOWN'
+    output       = ""
+    okLabel      = "OK"
+    snmp_version = 1
+
+    def listToString(list):
+        str = ""
+        for e in list:
+            str = str + e 
+        return str
+
+    if np['include']:
+        for included in np['include'].split(np['field-separator']):
+            included = included.lstrip(" ")
+            include_list.append(re.compile(included))
+            optIncCount += 1
+    if np['exclude']:
+        for excluded in np['exclude'].split(np['field-separator']):
+            excluded = excluded.lstrip(" ")
+            exclude_list.append(re.compile(excluded))
+
+    warning   = np['warning']
+    critical  = np['critical']
+    if np['label-oid']:
+        label_oid = np['label-oid']
+    else:
+        use_index = True
+
+    state_oid = np['state-oid']
+
+    if np['uom']:
+        uom = np['uom']
+
+    if np['breakLines']:
+        lineBreak = "<br>"
+    
+    if np['verbosity']:
+        verbosity = int(np['verbosity'])
+
+    if np['ok-label']:
+        okLabel = np['ok-label']
+
+    # Verify shared base-OID
+    if not use_index:
+        label_base_oid = label_oid[0:label_oid.rfind('.')]
+    state_base_oid = state_oid[0:state_oid.rfind('.')]
+
+    # Verify host
+    if np['host']:
+        host = np['host']
+    else:
+        np.nagios_exit('UNKNOWN', 'There was no host specified')
+
+    # Enforce existence of elementary arguments for operation
+    if (not np['warning'] and
+        not np['critical'] and
+        not np['regex'] and
+        not np['list']):
+        message = ('At least a warning/critical threshold or an OK-state regex'
+            ' has to be specified')
+        np.nagios_exit('UNKNOWN', message)
+
+    if ((warning and not critical) or (critical and not warning)):
+        np.nagios_exit('UNKNOWN', 'Both, warning and critical thresholds must be specified');
+
+    # Community string
+    if np['community']:
+        community = np['community']
+    else:
+        community = DEFAULT_COMMUNITY
+
+    # OK-state regex pattern
+    if np['regex']:
+        ok_regex = re.compile(np['regex'])
+    else:
+        ok_regex = None
+
+    if np['snmp-version']:
+        snmp_version = str(np['snmp-version'])
+        if not ('1' == snmp_version or '2c' == snmp_version):
+            np.nagios_exit('UNKNOWN', 'Supported SNMP protocol versions: 1, 2c')
+        
+    # Build label dictionary
+    if use_index:
+        label_dict = build_index_dict(state_oid, host, community, snmp_version)
+    else:
+        label_dict = build_value_dict(label_oid, host, community, snmp_version)
+
+    if not label_dict:
+        np.nagios_exit('UNKNOWN', snmp_unavail_msg)
+
+    # Build state-value dictionary
+    state_dict = build_value_dict(state_oid, host, community, snmp_version)
+    if not state_dict:
+        np.nagios_exit('UNKNOWN', snmp_unavail_msg)
+
+    # gather informational OIDs, if needed
+    if (np['info']):
+        info_pair_list = np['info'].split(np['field-separator'])
+        # label&OID pairs
+        for pair in info_pair_list:
+            isLabel = True
+            label = ""
+            info_list = []
+
+            # label and OID separated
+            for field in pair.split("&", 1):
+                if (isLabel):
+                    label = field
+                    isLabel = False
+                else:
+                    labeled_info_dict = build_value_dict(field, host, community, snmp_version)
+                    if not labeled_info_dict:
+                        np.nagios_exit('UNKNOWN', snmp_unavail_msg)
+
+                    # not necessarily all values are set, for savety, None values get replaced by empty strings
+                    for key in labeled_info_dict.iterkeys():
+                        if (labeled_info_dict[key] == None):
+                            labeled_info_dict[key] = ""
+            info_dict[label] = labeled_info_dict 
+
+    # Gather all state values for known labels and check them
+    # Sorted list
+    for name in sortedDictValues(label_dict):
+        
+        index = ""
+	for key in label_dict.iterkeys():
+            if label_dict[key] == name:
+                index = key
+                break
+        
+        if (not index or not name):
+            np.nagios_exit('CRITICAL', 'A label value is undefined.')
+
+        output_ = ""
+
+        try:
+            state = state_dict[index]
+        except KeyError:
+            continue
+
+        if np['list']:
+            # only print label and state information
+            print 'label: %s.%s = %s\nstate: %s.%s = %s\n' % (label_oid, index, name,
+                    state_oid, index, state)
+            continue
+
+        if include_list:
+            # try to match all include patterns on value
+            in_list = False
+            for pattern in include_list:
+                if pattern.search(name):
+                    in_list = True
+                    break
+            if not in_list:
+                continue
+            else:
+                incCount += 1 
+
+        if exclude_list:
+            # try to match all exclude patterns on value
+            in_list = False
+            for pattern in exclude_list:
+                if pattern.search(name):
+                    in_list = True
+                    break
+            if in_list:
+                continue
+
+        # add tags to label
+        if np['tag']:
+            name = np['tag'] + name
+
+        if (warning and critical):
+            perfdata = perfdata + "'" + name + "'=" + state + uom + ";" + warning + ";" + critical + ";; "
+        else:
+            perfdata = perfdata + "'" + name + "'=" + state + uom + ";;;; "
+
+        output_ = name
+
+        if info_dict:
+            output_ += " ("
+            for label in sortedDictKeys(info_dict):
+                output_ += label
+              
+                for info_index, info in info_dict[label].iteritems():
+                    if not info_index == index:
+                        continue
+
+                    output_ += "\"" + info + "\", "
+            output_ = output_.rstrip(", ")
+            output_ += ")"
+
+        state = re.sub("\(|\)*", '', state)
+	state = re.sub('\s.*', '', state) 
+        # check against a regular expression
+        if ok_regex:
+            # try to match OK-state regex
+            regOut = "[" + output_ + " is: " + state + "]" + lineBreak
+            if ok_regex.match(str(state)):
+                ok_list.append(regOut)
+                overallState = np.errors["OK"]
+            else:
+                crit_list.append(regOut)
+                overallState = np.errors["CRITICAL"]
+
+        # check against numerical warn/ crit thresholds
+        else:
+            threshOut = "[" + output_ + " has value of: " + state + uom + "]" + lineBreak
+            if critical and np._range_checker(state, critical):
+                crit_list.append(threshOut)
+                overallState = np.errors["CRITICAL"]
+            elif warning and np._range_checker(state, warning):
+                warn_list.append(threshOut)
+                if not overallState == np.errors["CRITICAL"]:
+                    overallState = np.errors["WARNING"]
+            else:
+                ok_list.append(threshOut)
+                if not overallState == np.errors["CRITICAL"] and not overallState == np.errors["WARNING"]:
+                    overallState = np.errors["OK"]
+
+    if optIncCount > 0 and optIncCount > incCount:
+        np.nagios_exit('CRITICAL', 'Not all included items were found')
+
+    if np['list']:
+        print ("All available OIDs listed.\n"
+                "Attention: this mode is for listing, not for checking.")
+        sys.exit()
+
+    
+    # output formating depending on verbosity levels
+    # in error case just the error causing instances are printed, in ok case just the ok-label
+    if verbosity == 0:
+        if overallState == np.errors["OK"]:
+            output = okLabel + lineBreak
+
+        elif overallState == np.errors["WARNING"]:
+            output = "WARNING - Warning is: " + lineBreak + listToString(warn_list)
+
+        elif overallState == np.errors["CRITICAL"]:
+            output = "CRITICAL - Critical is: " + lineBreak + listToString(crit_list)
+            if warn_list:
+                output += lineBreak + "Warning is: " + lineBreak + listToString(warn_list)
+
+        else:
+            output = "UNKNOWN - Unable to determine check result"
+
+    # in error case just the error causing instances are printed, in ok case all instances
+    elif verbosity == 1:
+        if overallState == np.errors["OK"]:
+            output = okLabel + lineBreak + listToString(ok_list)
+
+        elif overallState == np.errors["WARNING"]:
+            output = "WARNING - Warning is: " + lineBreak + listToString(warn_list)
+
+        elif overallState == np.errors["CRITICAL"]:
+            output = "CRITICAL - Critical is: " + lineBreak + listToString(crit_list)
+            if warn_list:
+                output += lineBreak + "Warning is: " + lineBreak + listToString(warn_list)
+
+        else:
+            output = "UNKNOWN - Unable to determine check result"
+
+
+    # always every instance are printed
+    elif verbosity == 2:
+        if overallState == np.errors["OK"]:
+            output = okLabel + lineBreak + listToString(ok_list)
+
+        elif overallState == np.errors["WARNING"]:
+            output = "WARNING - Warning is: " + lineBreak + listToString(warn_list)
+            if ok_list:
+                output = "Ok is: " + listToString(ok_list)
+
+        elif overallState == np.errors["CRITICAL"]:
+            output = "CRITICAL - Critical is: " + lineBreak + listToString(crit_list)
+            if warn_list:
+                output += lineBreak + "Warning is: " + lineBreak + listToString(warn_list)
+            if ok_list:
+                output += lineBreak + "Ok is: " + lineBreak + listToString(ok_list)
+
+        else:
+            output = "UNKNOWN - Unable to determine check result"
+
+
+    else:
+        np.nagios_exit('UNKNOWN', 'Unknown verbostity level. Valid values are: 0, 1 and 2')
+
+    if np['perfdata']:
+        perfdata = perfdata.rstrip(" ");
+        output += perfdata
+
+    output = re.sub("[ 0-9]*[ days,]* [0-9]*:[0-9]*:[0-9]*.[0-9]*", '', output)
+    output = re.sub("\(|\)*", '', output)
+    print output
+
+    if overallState == 'OK' or overallState == 0:
+        sys.exit(0)
+    elif overallState == 'WARNING' or overallState == 1:
+        sys.exit(1)
+    elif overallState == 'CRITICAL' or overallState == 2:
+        sys.exit(2)
+    elif overallState == 'UNKNOWN' or overallState == 3: 
+        sys.exit(3)
+
+# vim:et:sts=4:sw=4:syn=python

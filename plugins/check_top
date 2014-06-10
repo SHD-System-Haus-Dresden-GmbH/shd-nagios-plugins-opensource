@@ -1,0 +1,556 @@
+#!/usr/bin/perl
+#
+# (C) 2009, 2010 <Tobias Heinzmann> <tobias.heinzmann@shd-online.de> -- SHD GmbH
+#
+# Report bugs to <smbox-devel-team@shd-online.de>.
+#
+# $Id$
+# nagios: -epn
+
+use warnings;
+use strict;
+use Net::SNMP qw(oid_lex_sort oid_base_match snmp_type_ntop);
+use Nagios::Plugin;
+
+
+my $name   = 'check_top';
+my $SNMPWALK = '/usr/bin/snmpwalk';
+my $SNMPVERSION = '1'; # possible alternative is '2c'
+my @walkResult;
+my $session;
+my $snmpError;
+my $procTable;
+my $ressourceTable;
+my %processes;
+my $state  = UNKNOWN;
+my @charts;
+my $i      = 0;
+my $max;
+my $sysIdleId;
+my $label;
+my $memSize;
+my $memUsed = 0;
+my $memAllocUnits;
+my $cpuLoad;
+my $cpuCount = 0;
+my $cpuUsed = 0;
+my $threshold;
+my $cpuCentiTotal;
+my $ressourcePercent;
+my $output = '';
+my %oids   = (hrSWRunName              => '.1.3.6.1.2.1.25.4.2.1.2',
+              hrSWRunPerfCPU           => '.1.3.6.1.2.1.25.5.1.1.1',
+              hrSWRunPerfMem           => '.1.3.6.1.2.1.25.5.1.1.2',
+              hrProcessorLoad          => '.1.3.6.1.2.1.25.3.3.1.2',
+              hrStorageType            => '.1.3.6.1.2.1.25.2.3.1.2',
+              hrStorageAllocationUnits => '.1.3.6.1.2.1.25.2.3.1.4',
+              hrStorageSize            => '.1.3.6.1.2.1.25.2.3.1.5',
+              hrStorageUsed            => '.1.3.6.1.2.1.25.2.3.1.6',
+              hrStorageRam             => '.1.3.6.1.2.1.25.2.1.2',
+              mib2Host                 => '.1.3.6.1.2.1.25'
+);
+
+# this prototype is needed for recursion
+sub qsort($$$);
+ 
+# human readable numbers
+sub transNum($)
+{
+    my $n = shift;
+    return sprintf("%.2fKB", $n) if ($n < 1024);
+    $n = $n / 1024;
+    return sprintf("%.2fMB", $n) if ($n < 1024);
+    $n = $n / 1024;
+    return sprintf("%.2fGB", $n) if ($n < 1024);
+    $n = $n / 1024;
+    return sprintf("%.2fTB", $n) if ($n < 1024);
+}
+
+# returns name of the process that has a given id 
+sub getName($) {
+    my $id = shift;
+    return $processes{$id}{name};
+}
+
+# returns ref to an array that contains all ids of processes
+# that names match to given name
+sub getIds($) {
+    my $procName = shift;
+    my @ids;
+    
+    foreach (keys %processes) {
+        if (defined $processes{$_}{name} 
+            and $processes{$_}{name} =~ /$procName/) {
+            push @ids, $_;
+        }
+    }
+    unless (scalar @ids) {
+        return undef;
+    }
+    return \@ids;
+}
+
+# removes all processes from %processes and charts that do not match given name
+sub removeUnwanted($) {
+    my $procName = shift;
+    my $ids = getIds($procName);
+    return undef unless(defined $ids);
+    my %newProcesses;
+    my @newCharts;
+    my $i = 0;
+
+    foreach (@$ids) {
+        $newProcesses{$_} = $processes{$_};
+        $newCharts[$i] = $_;
+        $i ++;
+    }
+
+    @charts = @newCharts;
+    %processes = %newProcesses;
+    return 1;
+}
+
+# returns ressource allocation of the process that has a given id 
+sub getConsumption($) {
+    my $id = shift;
+    return $processes{$id}{consumes};
+}
+
+# returns sum of all processes identified by pids contained
+# in an array whose ref is param. %processes gets trimmed
+# to just contain processes matching to $plugin->opts->name
+sub getConsumptions($) {
+    my $procName = shift;
+    my $conSumm;
+    return undef unless (defined removeUnwanted($procName));
+    
+    foreach (keys %processes) {
+        $conSumm += $processes{$_}{consumes};
+    }
+    return $conSumm;
+}
+
+
+# @param:   1) baseOID in numerical form
+#           2) $sessionhandle
+#
+# @return:  reference to a hash which contains the table
+sub getTable($$$) {
+    my $baseoid = shift;
+    my $session = shift;
+    my $plugin  = shift;
+    my $result;
+
+    # if snmpwalk is used, delegate the call
+    if (defined $plugin->opts->snmpwalk) {
+        return getWalkTable($baseoid);
+    }
+    
+    unless (defined($result = $session->get_table(Baseoid => $baseoid)))
+    {
+        $plugin->nagios_exit(CRITICAL, 'Unable to receive SNMP data from host. '
+                            . $session->error());
+    }
+    return $result;
+}
+
+sub getWalkTable($) {
+    my $baseoid = shift;
+    my %returnOids;
+
+    foreach my $line (@walkResult) {
+        if ($line =~ /^$baseoid/) {
+            my ($oid, $value, $trash) = split(/ /, $line);
+            $value =~ s/"//g; # remove needless quotes
+            chomp $value;     # remove needless newlines
+            $returnOids{$oid} = $value; 
+        }
+    }
+    return \%returnOids;    
+}
+
+# quicksort charts array
+sub qsort($$$) {
+    my $lowest   = shift;
+    my $highest  = shift;
+    my $elements = shift;
+    my $low      = $lowest;
+    my $high     = $highest;
+
+    my $pivo     = getConsumption($$elements[int(($lowest + $highest) / 2)]);
+
+    while ($low <= $high) {
+        while (getConsumption($$elements[$low])  > $pivo) { $low++  } 
+        while (getConsumption($$elements[$high]) < $pivo) { $high-- }
+        if ($low <= $high) {
+            my $temp = $$elements[$low];
+            $$elements[$low]  = $$elements[$high];
+            $$elements[$high] = $temp;
+            $low++;
+            $high--;
+        }
+    }
+
+    if ($lowest < $high) {
+        qsort($lowest, $high, $elements);
+    }
+
+    if ($low < $highest) {
+        qsort($low, $highest, $elements);
+    }
+}
+
+
+### ---------------- here we go ('main') -------------- ###
+my $plugin = Nagios::Plugin->new(
+    usage => "Usage: %s -c|--critical <critical threshold>
+                 -H|--host <host name or IP>
+                [-C|--community <SNMP Community String>]
+                [-w|--warning <warning threshold>]
+                [-c|--critical <critical threshold>]
+                [-p|--port <alternative SNMP port>]
+                [-m|--mem]
+                [-N|--number]
+                [-T|--top <number of top consumers>]
+                [-h|--help]
+                [-n|--name <process name>]
+                [-s|--snmpwalk]",
+    shortname   => $name,
+    version     => '$Id$',
+);
+
+$plugin->add_arg(spec => 'critical|c=s',
+         help => "Percental usage of CPU or memory usage that, if overrun,\n"
+              . "   produces a critical result of the check. Defaults to 95%.\n"
+              . "   The percent symbol is not to be provided with the argument.\n",
+         default => "95",
+);
+
+$plugin->add_arg(spec => 'warning|w=s',
+         help => "Percental usage of CPU or memory usage that, if overrun,\n"
+              . "   produces a warning result of the check. Defaults to 85%.\n"
+              . "   The percent symbol is not to be provided with the argument.\n",
+         default => "85",
+);
+
+$plugin->add_arg(spec => 'host|H=s',
+         help => "IP address or DNS name of monitored host.\n",
+         required => 1,
+);
+
+$plugin->add_arg(spec => 'community|C=s',
+         help => "SNMP community string. Defaults to \'public\'\n",
+         default => "public",
+);
+
+$plugin->add_arg(spec => 'port|p=i',
+         help => "Alternative SNMP port. Defaults to 161.\n",
+         default => 161,
+);
+
+$plugin->add_arg(spec => 'mem|m',
+         help => "Instead of CPU time (which is default), memory usage is\n"
+              . "   monitored.\n",
+);
+
+$plugin->add_arg(spec => 'number|N',
+         help => "Instead of CPU time (which is default), the number of processes\n"
+              . "   that share the same name is monitored.\n",
+);
+
+$plugin->add_arg(spec => 'top|T=i',
+         help => "Number of top ressource consumers printed in output.\n"
+             . "   Defaults to ten. Be aware of the Nagios2 output limit of\n"
+             . "   332 bytes that will cut off every character afterwards.\n",
+         default => 10,
+);
+
+$plugin->add_arg(spec => 'name|n=s',
+         help => "If -n|--name is used, only processes that match this name\n"
+             . "   are used for memory consumption monitoring. Perl compatible\n"
+             . "   regular expressions are available. Use only in conjunction\n"
+             . "   with -m|--memory.\n"
+             . "   Checks how much of systems memory is consumed by\n"
+             . "   processes that match given name.\n",
+);
+
+$plugin->add_arg(spec => 'snmpwalk|s',
+         help => "Use systems native snmpwalk command instead of perls\n"
+             . "   Net::SNMP module. This can tried if the plugin\n"
+             . "   often runs into timeout. Normally, in performant\n"
+             . "   environments, snmpwalk is slower than perls SNMP module.\n"
+             . "   But in some cases (mainly if the monitored server runs\n"
+             . "   under very heavy load) snmpwalk can be faster because\n"
+             . "   all values are retrieved at once - despite the fact that\n"
+             . "   snmpwalk gathers much more information than Net::SNMP.\n"
+             . "   (The complete Host-MIB is requested.)\n",
+);
+
+# parse opts
+$plugin->getopts;
+
+if ($plugin->opts->name and not ($plugin->opts->mem or $plugin->opts->number)) {
+    $plugin->nagios_exit(UNKNOWN, 'Use -n|--name not in default mode (cpu load checking)');
+}
+
+if ($plugin->opts->number and $plugin->opts->mem) {
+	$plugin->nagios_exit(UNKNOWN, 'Do not use -m|--mem and -N|number together');
+}
+
+if ($plugin->opts->number and not $plugin->opts->name) {
+		$plugin->nagios_exit(UNKNOWN, 
+			'If -N|--number is used a name -n|--name must be provided');
+}
+
+# set signal handling for a proper reaction to timeout-cases
+$SIG{ALRM} = sub {
+    print "CRITICAL - Plugin ran into timeout. Maybe host unreachable.\n";
+    exit 2;
+};
+alarm $plugin->opts->timeout;
+
+
+# set the thresholds
+$threshold = $plugin->set_thresholds(warning  => $plugin->opts->warning,
+                                     critical => $plugin->opts->critical);
+
+# use snmpwalk instead of the perl module Net::SNMP
+if (defined $plugin->opts->snmpwalk) {
+    #Example:  snmpwalk -On -v 1 -c secret 1.2.3.4:161 .1.3.6.1.2.1.25   
+    my $command = $SNMPWALK . ' -On -Oq '
+                  . ' -v ' . $SNMPVERSION
+                  . ' -t ' . $plugin->opts->timeout
+                  . ' -c ' . $plugin->opts->community
+                  . ' '    . $plugin->opts->host . ':' . $plugin->opts->port
+                  . ' '    . $oids{mib2Host} 
+                  . ' 2>&1'; # also errors get dropped into @walkResult
+
+    @walkResult = qx/$command/;
+    my $exitCode = $? >> 8;
+
+    unless ($exitCode == 0) {
+        $plugin->nagios_exit(CRITICAL, 'Unable to establish SNMP connection '
+                                        . 'to host ' . $plugin->opts->host
+                                        . ": " . $walkResult[0]);
+    }
+
+    my $walkSuccessfull = undef;
+    foreach my $line (@walkResult) {
+        if ($line =~ /$oids{mib2Host}/) {
+            $walkSuccessfull = 1;
+        }   
+    }
+    unless ($walkSuccessfull) {
+        $plugin->nagios_exit(CRITICAL, 'Unable to receive SNMP data from host. Requested table is empty or does not exist');
+    }  
+}
+# use Net::SNMP
+else {
+    # SNMP-work starts here 
+    # create a session
+    ($session, $snmpError) = Net::SNMP->session(
+                hostname    => $plugin->opts->host,
+                community   => $plugin->opts->community,
+                port        => $plugin->opts->port,
+                timeout     => $plugin->opts->timeout,
+                version     => $SNMPVERSION
+    );
+    
+    unless(defined($session))
+    {
+        $plugin->nagios_exit(CRITICAL, "Unable to establish SNMP connection "
+                                        . "to host " . $plugin->opts->host);
+    }
+}
+
+$state = CRITICAL;
+
+# get the processes
+$procTable = getTable($oids{hrSWRunName}, $session, $plugin);
+# store id and name of processes
+foreach my $oid (keys %$procTable) {
+    my $id = (split(/\./, $oid))[12];
+
+    # M$ polutes the table so we have to sort that out
+    unless ($$procTable{$oid} =~ /^System$|^System\sIdle\sProcess$/) {
+        $processes{$id} = {name => $$procTable{$oid}, consumes => 0};
+        $charts[$i] = $id;
+        $i++;
+    } else {
+        $sysIdleId = $id;
+    }
+}
+
+if ($plugin->opts->mem) {
+    $ressourceTable = getTable($oids{hrSWRunPerfMem}, $session, $plugin);
+} elsif ($plugin->opts->number) {
+	my $name = $plugin->opts->name;
+	my $matchCount = 0;
+	
+	foreach (keys %$procTable) {
+		if ($$procTable{$_} =~ /$name/) {
+			$matchCount++;
+		}
+	}
+	
+	$label = "instances of $name";
+	$plugin->add_perfdata(label     => $label,
+    					value     => $matchCount,
+    					uom       => 'processes',
+    					min       => 0,
+ 					    threshold => $threshold
+	);
+	$state = $plugin->check_threshold($matchCount);
+	$plugin->nagios_exit($state, "$matchCount processes match \'$name\'");
+} else {
+    $ressourceTable = getTable($oids{hrSWRunPerfCPU},  $session, $plugin);
+}
+
+
+foreach my $oid (keys %$ressourceTable) {
+    my $id = (split(/\./, $oid))[12];
+    if (defined $sysIdleId) { # sorting out System Idle Process
+        next if ($id == $sysIdleId);
+    }
+    $cpuCentiTotal += $processes{$id}{consumes} = $$ressourceTable{$oid};
+}
+
+# either we got memory allocation or cpu time usage.
+# here we collect the process dependend ressource consumption data
+if (defined $plugin->opts->mem) {
+
+    my $memIndex;
+    my $memRef;
+    my $memSizeTable = getTable($oids{hrStorageType}, $session, $plugin);
+
+    # if an entry has storage type $oids{hrStorageRam} we found the RAM
+    foreach my $memEntry (keys %$memSizeTable) {
+        if ($$memSizeTable{$memEntry} eq $oids{hrStorageRam}) {
+            $memIndex = (split(/\./, $memEntry))[12];
+        }
+    }
+
+    unless (defined $memIndex) {
+        $plugin->nagios_exit(CRITICAL, 'Unable to find RAM information in SNMP data');
+    }
+
+    if (defined $plugin->opts->snmpwalk) {
+        $memRef = getWalkTable($oids{hrStorageAllocationUnits} . ".$memIndex");
+    } else {
+        $memRef = $session->get_request($oids{hrStorageAllocationUnits} . ".$memIndex");
+    }
+    $memAllocUnits = $$memRef{$oids{hrStorageAllocationUnits} . ".$memIndex"};
+
+
+    if (defined $plugin->opts->snmpwalk) {
+        $memRef = getWalkTable($oids{hrStorageSize} . ".$memIndex");
+    } else {
+        $memRef = $session->get_request($oids{hrStorageSize} . ".$memIndex");
+    }
+    $memSize = $$memRef{$oids{hrStorageSize} . ".$memIndex"};
+    $memSize = $memSize * $memAllocUnits;
+    
+    # a (processes) name was give
+    if (defined $plugin->opts->name) {
+        $label = 'memory usage by ' . $plugin->opts->name;
+        $memUsed = getConsumptions($plugin->opts->name);
+        unless (defined $memUsed) {
+            $plugin->nagios_exit(CRITICAL, 'No process(es) matching \'' 
+                                    . $plugin->opts->name . '\' found');
+        }
+        $memUsed = $memUsed * 1024; # this table is always in kbyte
+        $output .= 'Memory usage by \'' . $plugin->opts->name . '\': ';
+
+    # general memory usage monitoring (no -n|--name)
+    } else {
+        $label = 'memory usage';
+        if (defined $plugin->opts->snmpwalk) {
+            $memRef = getWalkTable($oids{hrStorageUsed} . ".$memIndex");
+        } else {
+            $memRef  = $session->get_request($oids{hrStorageUsed} . ".$memIndex");
+        }
+        $memUsed = $$memRef{$oids{hrStorageUsed} . ".$memIndex"};
+        $memUsed = $memUsed * $memAllocUnits;
+    
+        if (not defined $memSize or not defined $memUsed) {
+            $plugin->nagios_exit(CRITICAL, 'Unable to retrieve information '
+                                            . 'about memory usage');
+        }
+        $output .= 'Memory usage: ';
+    }
+
+    # calculate percentual usage
+    $memUsed = ($memUsed / $memSize) * 100;
+    # cut off all decimal places except of two
+    $memUsed = sprintf("%.2f", $memUsed);
+    $ressourcePercent = $memUsed;
+
+} else {
+    $label = 'cpu load / min';
+    # total cpu load
+    $cpuLoad        = getTable($oids{hrProcessorLoad}, $session, $plugin);
+    # total usage
+    foreach (values %$cpuLoad) {
+        $cpuCount++;
+        $cpuUsed += $_;
+    }
+    $ressourcePercent = $cpuUsed / $cpuCount;
+    $output .= 'CPU usage: ';
+}
+
+$state = $plugin->check_threshold($ressourcePercent);
+$output .= $ressourcePercent . "%";
+
+$plugin->add_perfdata(
+    label     => $label,
+    value     => $ressourcePercent,
+    uom       => '%',
+    min       => 0,
+    max       => 100,
+    threshold => $threshold
+);
+
+unless ($state == OK) {
+    $output .= ". Of that: "; 
+    $session->close if defined $session;
+} else {
+    $session->close if defined $session;
+    $plugin->nagios_exit($state, $output);
+}
+
+# now we quicksort our result
+qsort(0, scalar(@charts) -1 , \@charts);
+
+# check if the provided number of processes wished to output 
+# fits within array boundaries
+if ((scalar(@charts) -1) <= $plugin->opts->top) {
+    $max = scalar(@charts) -1;
+} else {
+    $max = $plugin->opts->top;
+}
+
+# build the output string
+for (my $ii = 0; $ii <= $max; $ii++) {
+    $output .= getName($charts[$ii]);     #name
+    $output .= "[" . $charts[$ii] . "]:"; #id
+
+    # translate to human readable values
+    if (defined $plugin->opts->mem) {
+        $output .= transNum(getConsumption($charts[$ii])) . " ";
+    } else {
+        my $cpuTemp = ((getConsumption($charts[$ii]) / $cpuCentiTotal) * 100);
+        $cpuTemp =~ m/(.*?\..{2}).*/g;
+        unless (defined $1) {
+            $output .= "0,00% ";
+        } else {
+            $output .= "$1% ";
+        }
+    }
+}
+
+# remove unneeded space at the end
+chop($output);
+
+$plugin->nagios_exit($state, $output);
+
+

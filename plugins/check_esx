@@ -1,0 +1,2360 @@
+#!/usr/bin/perl
+# nagios: -epn
+# This plugin is not ePN compatible since it heavily ueses global vars.
+#
+# @author:Tobias Heinzmann
+# @copyright: 2009,2010 SHD- Systemhaus Dresden GmbH
+
+use strict;
+use warnings;
+use Nagios::Plugin;
+use File::Basename;
+use Proc::ProcessTable;
+use POSIX qw(setsid);
+use Sys::Syslog;
+use Shd::StatusCache;
+
+# TODO
+# * add VM monitoring as well
+# * add DC monitoring as well
+
+# This plugin is only for direct use on an esx-host, not for a data center,
+# so far.
+# VIPerl is provided by the package shd-libvmware-perl.
+# It contains a lot of libs that will probably clash with
+# official debian packed libs. Therefore it was decided
+# to pitch all that stuff to its own directory where it will 
+# not harm anything else:
+use lib "/usr/lib/shd-libvmware-perl";
+use VMware::VIRuntime;
+
+my $PLUGNAME = basename($0);
+my $VERSION  = '$Id: check_esx.pl 3634 2010-02-18 16:28:23Z heinzmann@SHD-ONLINE.DE $';
+my $TIMEOUT  = 45;
+my $host;
+my $servDesc = 'check_esx'; # this is a dummy to satisfy StatusCache.pm
+my $hostView;
+my $perfManager;
+my $counterList;
+my @myPerfCounter;
+my $statusCache;
+my $ressource;
+my $instName;
+my $result;
+my $uom = '';
+my $max;
+my $output;
+my $pidFile;
+my $runUntil;
+my $ttl;
+my $queryTimeout;
+my $exitForced = 0;
+my $checkProcId;
+my @inList;
+my @exList;
+my @okList;
+my @warnList;
+my @critList;
+my $finalResult;
+my $finalValue;
+my $finalUom;
+my $finalMax;
+my $finalLabel = '';
+my $label = '';
+
+
+
+# autoflush
+$|++;
+
+# Structures where the gathered infos are stored:
+# Here all perfcounter values get saved
+my %hostPerfCounter = ();
+
+# Here all state informations get saved
+my %hostStates = ();
+
+# In this structure all needed perfCounter get registered.
+# id and unitInfos get collected from the server and are not
+# yet contained.
+my %perfCounterInfo = (
+    cpuUsagePercent => {
+                         groupInfo  => 'cpu',
+                         rollupType => 'average',
+                         nameInfo   => 'usage',
+                         instance   => '',
+    },
+    cpuUsageMhz => {
+                     groupInfo  => 'cpu',
+                     rollupType => 'average',
+                     nameInfo   => 'usagemhz',
+                     instance   => '',
+    },
+    memUsagePercent => {
+                         groupInfo  => 'mem',
+                         rollupType => 'average',
+                         nameInfo   => 'usage',
+                         instance   => '',
+    },
+    memConsumedMb => {
+                       groupInfo  => 'mem',
+                       rollupType => 'average',
+                       nameInfo   => 'consumed',
+                       instance   => '',
+    },
+    memSwapUsageMb => {
+                        groupInfo  => 'mem',
+                        rollupType => 'average',
+                        nameInfo   => 'swapused',
+                        instance   => '',
+    },
+    memOverheadMb => {
+                       groupInfo  => 'mem',
+                       rollupType => 'average',
+                       nameInfo   => 'overhead',
+                       instance   => '',
+    },
+    netUsageKb => {
+                    groupInfo  => 'net',
+                    rollupType => 'average',
+                    nameInfo   => 'usage',
+                    instance   => '*',
+    },
+    netReceivedKb => {
+                       groupInfo  => 'net',
+                       rollupType => 'average',
+                       nameInfo   => 'received',
+                       instance   => '*',
+    },
+    netTransmitedKb => {
+                         groupInfo  => 'net',
+                         rollupType => 'average',
+                         nameInfo   => 'transmitted',
+                         instance   => '*',
+    },
+    diskUsage => {
+                   groupInfo  => 'disk',
+                   rollupType => 'average',
+                   nameInfo   => 'usage',
+                   instance   => '',
+    },
+    diskCommandsAborted => {
+                             groupInfo  => 'disk',
+                             rollupType => 'summation',
+                             nameInfo   => 'commandsAborted',
+                             instance   => '*',
+    },
+    diskBusResets => {
+                       groupInfo  => 'disk',
+                       rollupType => 'summation',
+                       nameInfo   => 'busResets',
+                       instance   => '*',
+    },
+    diskReadLatency => {
+                         groupInfo  => 'disk',
+                         rollupType => 'average',
+                         nameInfo   => 'totalReadLatency',
+                         instance   => '*',
+    },
+    diskWriteLatency => {
+                          groupInfo  => 'disk',
+                          rollupType => 'average',
+                          nameInfo   => 'totalWriteLatency',
+                          instance   => '*',
+    },
+    diskKernelLatency => {
+                           groupInfo  => 'disk',
+                           rollupType => 'average',
+                           nameInfo   => 'kernelLatency',
+                           instance   => '*',
+    },
+    diskDeviceLatency => {
+                           groupInfo  => 'disk',
+                           rollupType => 'average',
+                           nameInfo   => 'deviceLatency',
+                           instance   => '*',
+    },
+    diskQueueLatency => {
+                          groupInfo  => 'disk',
+                          rollupType => 'average',
+                          nameInfo   => 'queueLatency',
+                          instance   => '*',
+    },
+);
+
+
+my %daemonInfo = (queryDuration => 0);
+
+my %cacheRefs = (hostPerfCounter => \%hostPerfCounter,
+                 perfCounterInfo => \%perfCounterInfo,
+                 hostStates      => \%hostStates,
+                 daemonInfo      => \%daemonInfo);
+
+my $np = Nagios::Plugin->new(usage     => "",
+                             version   => $VERSION,
+                             plugin    => $PLUGNAME,
+                             shortname => $PLUGNAME,
+                             timeout   => $TIMEOUT,
+                             extra     => '',);
+
+
+#
+### ------------------------ argument definitions ------------------ ###
+#
+$np->add_arg(spec => 'host|H=s',
+             help => "--host|-H <ip-address>\n"
+               . "   ESX host IP address or DNS name\n",
+             required => 1,);
+
+$np->add_arg(spec => 'user|U=s',
+             help => "--user|-U <username>\n" 
+               . "   Username used for connection to ESX host\n",);
+
+$np->add_arg(spec => 'passwd|P=s',
+             help => "--passwd|-P <password>\n"
+               . "   Password of user used for connection to ESX host\n",);
+
+$np->add_arg(spec => 'warning|w=s',
+             help => "--warning|-w <threshold>\n"
+               . "   Warning threshold\n",);
+             
+$np->add_arg(spec => 'critical|c=s',
+             help => "--critical|-c <threshold>\n"
+               . "   Critical threshold\n",);
+             
+$np->add_arg(spec => 'ressource|r=s',
+             help => "--ressource|-r <ressource identifier>\n"
+               . "   Herewith the ESX hosts ressource(s) that shall be monitored\n"
+               . "   get defined. Possible ressource identifiers are:\n"
+               . "   perf - Performance counter. If a perf counter is meant to be\n"
+               . "         monitored, it must be specified with -n|--name.\n"
+               . "         Threshold definition (--warnig|-w and --critical|-c) is needed.\n"
+               . "   sensor - Every ESX host has sensors that can be monitored.\n"
+               . "         The sensors state is used for alarm generation. A few sensors\n"
+               . "         have a value usefull for trendgraph creation, but most don`t.\n"
+               . "         The specific sensor can be defined with -n|--name.\n"
+               . "         For multiple sensor selection --includeList|-I or --excludeList|-E\n"
+               . "         can be used. If trendgraphs perf data is wanted (e.g. for\n"
+               . "         trendgraphs) --name|-n must be used, because a definite instance\n"
+               . "         is needed.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   mpath - Monitors the state of a LUNs paths. --name|-n is used\n"
+               . "         to specify which LUNs paths are to be monitored. Thresholds can\n"
+               . "         get defined for the number of paths that sholud be in \'active\'\n"
+               . "         or \'standby\' mode for that LUN. E.g.:\n"
+               . "         --name \'lun123\' -w 3: -c 2:\n"
+               . "         would result in a warning if less than 3 and in a critical\n"
+               . "         if less than 2 paths are in \'active\' or \'standby\'for lun123.\n"
+               . "         If a LUN has no path that is \'active\', the check results\n"
+               . "         in critical automatically.\n"
+               . "   controller - Monitors the state of a controller.\n"
+               . "         --name|-n can be used for specification of a single controller.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         controllers to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   adapter - Monitors the state of an host bus adapter.\n"
+               . "         --name|-n can be used for specification of a single adapter.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         adapters to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   mem - Specifies that the memory device state will be monitored.\n"
+               . "   connection - Monitors the general connection state.\n"
+               . "   maintenance - Monitors if maintenance seams to be necessary\n"
+               . "   overall - Monitors the systems overall state.\n"
+               . "   scsi - Specifies the SCSI controllers state to be monitored.\n"
+               . "         In case of multiple scsi controllers --name|-n can be used\n"
+               . "         for detailed specification of a single controller.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         controller to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   cpu - Specifies that a CPU sockets state will be monitored.\n"
+               . "         In case of multiple CPU sockets --name|-n can be used\n"
+               . "         for detailed specification of a socket.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         sockets to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   vmPower - Defines that a Virtual Machine state (powered on or off)\n"
+               . "         is monitored. To specify a VM, --name|-n can be used.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         VMs to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   service - Specifies that a services state (running or not running)\n"
+               . "         is to be monitored. To specify a service, --name|-n can be used.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         services to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "   datastore - Specifies that a datasores (vmfs) allocation is to be\n"
+               . "         monitored. Threshold definition (--warnig|-w and --critical|-c)\n"
+               . "         is possible in percent or in GB. To use percentage values just\n"
+               . "         add the percent character (%) at the end of the thresholds.\n"
+               . "         E.g.: -w 90% -c 95%. Use with GB values: -w 100 -c 105.\n"
+               . "         The values relate to the allocated space on the datastore.\n"
+               . "         --includeList|-I and --excludeList|-E can be used for multiple\n"
+               . "         datastores to be checked.\n"
+               . "         If no instance is selected, all instances are checked at a stroke.\n"
+               . "         Multiple datastore checking requires that the same thresholds are\n"
+               . "         applicable to all checked datastore equally.\n"
+               . "   queryTime - time in seconds the last query took to gather all data\n"
+               . "         from the monitored system.\n"
+,);
+
+$np->add_arg(spec => 'name|n=s',
+             help => "--name|-n <'instance name pattern'>\n"
+                   . "   Name of a specific instance of a ressource.\n"
+                   . "   If --name|-n is used, --list|-l, includeList|-I, excludeList|-E must\n"
+                   . "   not be used.\n"
+                   . "   Perl compatible regular expressions are supported. If there are multiple\n"
+                   . "   matches for a name-pattern, a random instance will be used. Therefore it\n"
+                   . "   is advised to specify a instances name as precisely as possible to avoid\n"
+                   . "   monitoring the wrong instance.\n"
+                   . "   If an instances name containes a whitespace or special characters, the\n"
+                   . "   name must be single quoted.\n"
+                   . "   If a name contains characters that can affect the pattern matching, this\n"
+                   . "   characters must be escaped with a backslash '\\'. A common example is\n"
+                   . "   round brackets - '(' and ')'.\n"
+                   . "   --list|-l provides a list of names delimited by square brackets. These\n"
+                   . "   are not part of the name but rather printed out for easier reading and must\n"
+                   . "   not accidentally used as part of the instances name.\n"
+                   . "\n"
+                   . "   See perldoc.perl.org/perlrequick.html for information\n"
+                   . "   about Perls regular expressions.\n"
+                   . "\n"
+                   . "   Performance data and thus trendgraphs are only available\n"
+                   . "   if a single instance was defined with --name|-n!\n"
+,);
+
+$np->add_arg(
+    spec        => 'includeList|I=s',
+    help        => "--includeList|-I <list;of;instances;semicolon;separated>\n"
+                . "   List of instances that are monitored. All Instances of a ressource\n"
+                . "   that match one of this names are included into monitoring. All\n"
+                . "   other instances are not payed attention to. Do not use in conjunction\n"
+                . "   with --name|-n, --list|-l, --debug|-d or --excludeList|-E.\n"
+                . "   The single instance names are separated by default with a semicolon.\n"
+                . "   --listFieldSeparator|-S changes this behaviour.\n"
+                . "   Performance data and therewith trendgraphs are only available if\n"
+                . "   an single instance was defined with --name|-n.\n"
+                . "   If a instance name contains a character that could affect the pattern\n"
+                . "   matching this character must get escaped with a backslash. A common\n"
+                . "   example therefor is round brackets - '(' and ')'.\n" 
+                . "   It is advised to single quote the instance name list.\n"
+,);
+
+$np->add_arg(
+    spec        => 'excludeList|E=s',
+    help        => "--excludeList|-E <list;of;instances;semicolon;separated>\n"
+                . "   List of instances that are not monitored. All Instances of a ressource\n"
+                . "   that match one of this names are excluded from monitoring. Do not use\n"
+                . "   in conjunction with --name|-n, --list|-l, --debug|-d or --excludeList|-E.\n"
+                . "   The single instance names are separated by default with a semicolon.\n"
+                . "   --listFieldSeparator|-S changes this behaviour.\n"
+                . "   Performance data and therewith trendgraphs are only available if\n"
+                . "   an single instance was defined with --name|-n.\n"
+                . "   If a instance name contains a character that could affect the pattern\n"
+                . "   matching this character must get escaped with a backslash. A common\n"
+                . "   example therefor is round brackets - '(' and ')'.\n" 
+                . "   It is advised to single quote the instance name list.\n"
+,);
+
+$np->add_arg(
+    spec        => 'listFieldSeparator|S=s',
+    help        => "--listFieldSeparator|-S <new separator char sequence>\n"
+                . "   If --includeList|-I or --excludeList|-E is used, herewith the field\n"
+                . "   separator can get set. The default is a comma (,). Multiple\n"
+                . "   characters are possible.\n"
+                . "   Semicolons are interpreted by Nagios as a line separating character.\n"
+                . "   Therefore it is advised not to use them. Exclamation marks are used by\n"
+                . "   Nagios as command argument separator, do not use them, too\n",
+    default     => ','
+,);
+
+$np->add_arg(spec => 'debug|d',
+             help => "--debug|-d\n"
+                . "   Use only on command line. Prints detailed information regarding all\n"
+                . "   detecteed ressources.\n"
+,);
+
+$np->add_arg(spec => 'list|l',
+             help => "--list|-l\n"
+               . "   Lists all instances of a ressource type. Use in conjunction with\n"
+               . "   --ressource|-r. No status information is calculated, no alarm will\n"
+               . "   be raised! This mode is just for gathering information on what can\n"
+               . "   be monitored at all and not for the actuall checking!\n\n"
+               . "   Due to sometimes long instance names all names are bounded by\n"
+               . "   square brackets. These are not part of the instances name, so this\n"
+               . "   brackets must not used when defining a check with --name|-n or\n"
+               . "   in- resp. excludeLists. If, for example, this is a name of a performance\n"
+               . "   counter [memOverheadMb] given by --list|-l, it would be used as\n"
+               . "   -n memOverheadMb in conjunction with --name|-n or the lists\n"
+,);
+
+$np->add_arg(spec  => 'cleanCache|C',
+             help  => "--cleanCache|-C\n"
+                . "   This plugin uses status data caching. Every check of a host collects\n"
+                . "   all data concerning this host and stores it in the cache. If another\n"
+                . "   check on that host is triggered it first looks into the cache to\n"
+                . "   determine if the cache data is recent enough. If so the cached data\n"
+                . "   is used and no query is send to the host.\n"
+                . "   If an error occurs, the plugin may be disrupted while reading the\n"
+                . "   cache. In that case the cache could stay locked. If so this plugin\n"
+                . "   must get called with --cleanCache to remove the cache and start anew.\n"
+                . "   If a check reads to cache while it gets removed, it may crash.\n"
+,);
+
+$np->add_arg(
+    spec        => 'daemonTtl|T=i',
+    help        => "--daemonTtl|-T\n"
+                . "   If this number of seconds expire the daemon will exit automatically.\n"
+                . "   Every call of the plugin resets this timer. So, subsequently,\n"
+                . "   if the plugin gets not executed, the check daemon will run for\n"
+                . "   daemonTtl seconds and then terminates it self.\n"
+                . "   Defaults to 600 seconds.\n",
+    default     => 600,
+);
+
+$np->add_arg(
+    spec        => 'queryTimeout|q=i',
+    help        => "--queryTimeout|-q\n"
+                . "   This sets the timeout for queries to the ESX host in seconds.\n"
+                . "   If after this time no answer from the monitored system arrives\n"
+                . "   all checks checking this host result in critical.\n"
+                . "   Defaults to 200 seconds.\n",
+    default     => 200,
+);
+
+$np->add_arg(
+    spec        => 'checkInterval|i=i',
+    help        => "--checkInterval|-i\n"
+                . "   This sets the interval in seconds that the daemon will re-check\n"
+                . "   the monitored system. Values smaller than 120 are not advised.\n"
+                . "   In some cases querying a ESX host can take longer than one minute.\n"
+                . "   Take care that the time the ESX host needs to respond is not greater\n"
+                . "   than the checkInterval.\n"
+                . "   Defaults to 240 seconds (4 minutes).\n",
+    default     => 240, # 4 minutes
+);
+
+$np->add_arg(
+    spec        => 'killDaemon|K',
+    help        => "--killDaemon|-K\n"
+                . "   Kills the daemon and its child and removes the\n"
+                . "   cache for the corresponding host.\n",
+);
+
+
+# skel
+#$np->add_arg(
+#    spec        => '',
+#    help        => "",
+#    required    => 0,
+#    default     => 0,
+#);
+
+$np->getopts;
+
+#
+### ------------------------- option checking --------------------- ###
+#
+# 'normal' mode
+unless (defined $np->opts->cleanCache or defined $np->opts->killDaemon) {
+
+   if (defined $np->opts->includeList and defined $np->opts->excludeList) {
+        $np->nagios_exit(UNKNOWN, '--excludeList|-E and --includeList|-I are not meant to be used together.');
+    }
+
+    unless (defined $np->opts->user) {
+        $np->nagios_exit(UNKNOWN, 'Missing argument: --user|-U');
+    }
+    
+    unless (defined $np->opts->passwd) {
+        $np->nagios_exit(UNKNOWN, 'Missing argument: --passwd|-P');
+    }
+
+    # debug mode
+    if (defined $np->opts->debug) {
+        if ( defined $np->opts->list) {
+            $np->nagios_exit(UNKNOWN, '--list|-l is not allowed while in debug mode');
+        }
+        if (defined $np->opts->includeList) {
+            $np->nagios_exit('UNKNOWN', '--includeList|-I not allowed in debug-mode');
+        }
+        if (defined $np->opts->excludeList) {
+            $np->nagios_exit('UNKNOWN', '--excludeList|-I not allowed in debug-mode');
+        }
+
+    # non-debug mode 
+    } else {
+        unless (defined $np->opts->ressource) {
+            print $np->opts->_help();
+            $np->nagios_exit(UNKNOWN, 'Missing argument: --ressource|-r');
+        }
+    
+        if (defined $np->opts->list) {
+            if (defined $np->opts->name) {
+                $np->nagios_exit(UNKNOWN, '--name|-n and --list|-l are not to be used together');
+            }
+            if (defined $np->opts->includeList) {
+                $np->nagios_exit(UNKNOWN, '--includeList|-I is not alloed when in debug mode');
+            }
+            if (defined $np->opts->excludeList) {
+                $np->nagios_exit(UNKNOWN, '--excludeList|-I is not alloed when in debug mode');
+            }
+        }
+    }
+
+# cleanCache
+} else {
+    if (defined $np->opts->ressource) {
+        $np->nagios_exit(UNKNOWN, 'No ressource (--ressource|-r) checking allowed when cache cleaning (--cleanCache|-C)'
+                                    . ', or killing daemon (--killDaemon|-K)');
+    }
+}
+
+
+if (defined $np->opts->debug) {
+    if (defined $np->opts->list) {
+        $np->nagios_exit(UNKNOWN, "Do not use --debug|-d in conjunction with --list|-l");
+    }
+    if (defined $np->opts->ressource) {
+        $np->nagios_exit(UNKNOWN, "Do not use --debug|-d in conjunction with --ressource|-r");
+    }
+    if (defined $np->opts->name) {
+        $np->nagios_exit(UNKNOWN, "Do not use --debug|-d in conjunction with --name|-n");
+    }
+    if (defined $np->opts->includeList) {
+        $np->nagios_exit(UNKNOWN, '--includeList|-I is not alloed when in debug mode');
+    }
+    if (defined $np->opts->excludeList) {
+        $np->nagios_exit(UNKNOWN, '--excludeList|-I is not alloed when in debug mode');
+    }
+}
+
+
+#
+### -------------------------------- 'main' ------------------------------- ###
+#
+
+$host         = $np->opts->host;
+$ressource    = $np->opts->ressource;
+$instName     = $np->opts->name ? $np->opts->name : '';
+$ttl          = $np->opts->daemonTtl;
+$queryTimeout = $np->opts->queryTimeout;
+
+if (defined $np->opts->includeList) {
+    @inList = split ($np->opts->listFieldSeparator, $np->opts->includeList);
+}
+
+if (defined $np->opts->excludeList) {
+    @exList = split ($np->opts->listFieldSeparator, $np->opts->excludeList);
+}
+
+$statusCache = Shd::StatusCache->new($PLUGNAME, $host, $servDesc);
+$statusCache->setTimeOnly();
+
+
+# handle timeouts
+$SIG{ALRM} = sub {
+    $statusCache->unlockAll();
+    print "CRITICAL - Plugin ran into timeout. Maybe host unreachable.\n";
+    exit 2;
+};
+
+# increments the timer by $ttl
+$SIG{USR1} = sub {
+    unless ($exitForced) {
+        $runUntil = time + $ttl;
+    }
+};
+
+# increments the timer by 0 so that no more runs are done - means exit soon
+$SIG{USR2} = sub {
+    $exitForced = 1;
+    syslogThis('Caught signal USR2 - quitting');
+    killChild();
+    $runUntil = time;
+};
+
+# see SIG{USR2}
+$SIG{HUP} = sub {
+    $exitForced = 1;
+    syslogThis('Caught signal HUP - quitting');
+    killChild();
+    $runUntil = time;
+};
+
+# see SIG{USR2}
+$SIG{TERM} = sub {
+    $exitForced = 1;
+    syslogThis('Caught signal TERM - quitting');
+    killChild();
+    $runUntil = time;
+};
+
+
+alarm $np->opts->timeout;
+
+
+$pidFile = $statusCache->getPidFile();
+
+
+# if a daemon runs it gets killed now
+if ($np->opts->killDaemon) {
+    unless (-e $pidFile) {
+        secureNagiosExit(CRITICAL, 'There is no pid file, unable to determine pid of check esx daemon');
+    }
+    my $daemonPid = getPidFromFile($statusCache->getPidFile());
+  
+    unless (kill USR2 => $daemonPid) {
+        secureNagiosExit(CRITICAL, 'Unable to terminate daemon ' . $!); 
+    }
+
+    unless ($np->opts->cleanCache) {
+        secureNagiosExit(OK, 'Check esx daemon was killed successfully.');
+    } else {
+        $output = 'Check esx daemon was killed successfully.';
+    }
+}
+
+if (defined $np->opts->cleanCache) {
+
+    if ($statusCache->forceCacheRemove()) {
+        if (defined $output) {
+            $np->nagios_exit(OK, "Cache for host $host removed. $output");
+        } else {
+            $np->nagios_exit(OK, "Cache for host $host removed.");
+        }
+    } else {
+        $np->nagios_exit(UNKNOWN, 'Unable to remove cache. Remove this directory '
+                        . '   and its content manually: ' . $statusCache->getCachePath());
+    }
+}
+
+
+# If new data from the server is needed
+if ($statusCache->needNewCache()) {
+
+    # this starts the daemon
+    daemonRun();
+
+# The status- and performance-values are read out of the cache
+} else {
+
+
+    # this indicates that cached data is available but no daemon is running.
+    # this may happen due to connection problems to the esx host
+    unless (-e $statusCache->getPidFile) {
+        daemonRun();
+    }
+
+    my $error =  $statusCache->getError();
+    if ($error) {
+        secureNagiosExit(CRITICAL, $error);
+    }
+
+    # reset daemon timer
+    my $daemonPid = getPidFromFile($statusCache->getPidFile);
+    if (defined $daemonPid) {
+        unless (kill USR1 => $daemonPid) {
+            secureNagiosExit(WARNING, "Unable to reset ESX check daemon timer for PID $daemonPid"); 
+        }
+    }
+
+    %hostPerfCounter = $statusCache->getCache('hostPerfCounter');
+    %perfCounterInfo = $statusCache->getCache('perfCounterInfo');
+    %hostStates      = $statusCache->getCache('hostStates');
+    %daemonInfo      = $statusCache->getCache('daemonInfo');
+}
+
+
+# The cache is not needed anymore 
+$statusCache->unlockAll();
+
+# This is for debugging only. Generates a lot of output (in fact this
+# prints out everything contained in cache). So the debug-switch is 
+# for cli only.
+if ($np->opts->debug) {
+    printHostPerfCounts();
+    printAllHostStates($host);
+    $np->nagios_exit(OK, "");
+}
+
+
+#
+### --------------------------- actual checking  -------------------------- ###
+#
+
+# Which kind of ressource is to be checked?
+
+### perf counter
+if ($ressource eq 'perf') {
+    checkPerfCounter($instName);
+}
+
+### sensors 
+if ($ressource eq 'sensor') {
+    checkSensor($instName, $host);
+}
+
+#### LUNs
+if ($ressource eq 'mpath') {
+    checkMpathState($instName, $host);
+}
+
+### controllers
+if ($ressource eq 'controller') {
+    checkState('controllers', $instName, $host);
+}
+
+### adapters
+if ($ressource eq 'adapter') {
+    checkState('adapters', $instName, $host);
+}
+
+# memory device
+if ($ressource eq 'mem') {
+    checkState('memory', $instName, $host);
+}
+
+# scsi controller
+if ($ressource eq 'scsi') {
+    checkState('scsi', $instName, $host);
+}
+
+# cpu health
+if ($ressource eq 'cpu') {
+    checkState('cpuhealth', $instName, $host);
+}
+
+# connection state
+if ($ressource eq 'connection') {
+    if (defined $np->opts->name) {
+        $np->nagios_exit(UNKNOWN, '--name|-n not supported in connection mode');
+    }
+    checkSimpleState('connectionState', $host);
+}
+
+# maintenace state
+if ($ressource eq 'maintenance') {
+    if (defined $np->opts->name) {
+        $np->nagios_exit(UNKNOWN, '--name|-n not supported in maintenance mode');
+    }
+    checkSimpleState('maintenance', $host);
+}
+
+# overall state
+if ($ressource eq 'overall') {
+    if (defined $np->opts->name) {
+        $np->nagios_exit(UNKNOWN, '--name|-n not supported in overall mode');
+    }
+
+    checkSimpleState('overallState', $host);
+}
+
+# vms power state
+if ($ressource eq 'vmPower') {
+    checkState('vmPowerState', $instName, $host);
+}
+
+# services state
+if ($ressource eq 'service') {
+    checkState('services', $instName, $host);
+}
+
+# datastores usage
+if ($ressource eq 'datastore') {
+    checkDatastore($instName, $host);
+}
+
+if ($ressource eq 'queryTime') {
+    if (defined $np->opts->list) {
+        $np->nagios_exit(UNKNOWN, '--list|-l not supported in queryTime mode');
+    } 
+    if (defined $np->opts->name) {
+        $np->nagios_exit(UNKNOWN, '--name|-n not supported in queryTime mode');
+    }
+    $np->add_perfdata(label     => 'query_time',
+                      value     => $daemonInfo{queryDuration},
+                      uom       => 'sec',
+                      warning   => $np->opts->warning,
+                      critical  => $np->opts->critical,
+                      min       => 0,
+                      max       => $queryTimeout);
+    $np->nagios_exit($np->check_threshold($daemonInfo{queryDuration}), "Querying host $host took " 
+                            . $daemonInfo{queryDuration} . " seconds");
+} 
+
+print $np->opts->_help();
+$np->nagios_exit(UNKNOWN, "Ressource \'$ressource\' unknown");
+
+
+#
+### ---------------------------- SUB definitions -------------------------- ###
+#
+
+
+sub setTimer {
+    my $incrementBy = shift;
+    $runUntil       = time + $incrementBy;
+}
+
+
+sub writePid {
+    my $pidFile = shift;
+
+    my $fh;
+    unless (open $fh, '>', $pidFile) {
+        return 0;
+    }
+    print $fh "$$";
+    close $fh;
+    return 1;
+}
+
+
+sub rmPidFile {
+    unless (unlink($pidFile)) {
+        syslogThis('Unable to remove PID file ' . $pidFile);
+        return 1;
+    }
+    return 0;
+}
+
+
+sub syslogThis {
+    my $logMsg      = shift;
+    my $priority    = 'info';
+    my $name        = $PLUGNAME;
+    my $logOpt      = 'ndelay,pid';
+    my $logFacility = 'LOG_DAEMON';
+    openlog($name, $logOpt, $logFacility);
+    syslog($priority, $logMsg);
+    closelog();
+}
+
+
+sub isCheckDaemon {
+    my $pid = shift;
+    return 0 unless (defined $pid);
+
+    # searching the daemon in proc-list
+    my $ptab = new Proc::ProcessTable;
+    foreach my $proc (@{$ptab->table}) {
+        next unless ($proc->pid == $pid);   # some other process
+        my $daemonFileName = $proc->fname;  # pid matches, test the filename
+        chomp ($daemonFileName);
+        if ($daemonFileName eq $PLUGNAME) {
+            # now its (nearly) sure that a deamon is already running
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+sub getPidFromFile {
+    my $pidFile     = shift;
+    my $daemonPid   = undef;
+    my @pidFileCont;
+
+    return undef unless (defined $pidFile);
+    return undef unless (-e $pidFile);
+    # read the PID
+    eval {
+        open (PIDF, "<", $pidFile);
+        @pidFileCont = <PIDF>;
+        close PIDF;
+    };
+
+    if ($@) {
+        secureNagiosExit(CRITICAL, "Unable to read PID-File " . $pidFile . ": " . $@);
+    }
+
+    # PID is always the first line
+    $daemonPid = $pidFileCont[0];
+    chomp ($daemonPid); # not needed, but who knows...
+    return undef unless ($daemonPid =~ /^\d+$/); # is it a pid?
+    return $daemonPid;
+}
+
+
+
+# writes given pid to pidFile
+# returns 0 if something went wrong, that might be:
+#  - the PID file already exists
+# returns 1 if all is fine
+sub writePidToFile {
+    my $pid     = shift;
+    my $pidFile = shift;
+
+    print "pid: $pid, pidFile: $pidFile\n";
+        
+    return 0 if (-e $pidFile);
+
+    eval {
+        open (PIDF, ">", $pidFile);
+        print PIDF $pid;
+        close PIDF;
+    };
+
+    if ($@) {
+        return 0;
+    }
+    return 1;
+}
+
+sub setResult {
+    my $result = shift;
+
+    return if (not defined $result or $result < 0 or $result > 3 or $result eq '');
+
+    unless (defined $finalResult) {
+        $finalResult = $result;
+    }
+
+    if ($finalResult == OK) {
+        # anything is heavier than OK
+        $finalResult = $result;
+
+    } elsif ($finalResult == WARNING) {
+        # WARN is heavier than WARN
+        unless ($result == OK) {
+            $finalResult = $result;
+        }
+
+    } elsif ($finalResult == CRITICAL) {
+        # CRIT is unbeaten
+        1; # (inofficial) perl no-op
+
+    } elsif ($finalResult == UNKNOWN) {
+        # CRIT beats UNKNOWN
+        if ($result != OK and $result != WARNING) {
+            $finalResult = $result;
+        }
+    }
+}
+
+
+sub evalListsAndExit {
+    my $outStr; 
+    my $instName = '';
+
+    if (scalar(@critList) > 0) {
+        setResult(CRITICAL);
+        unless (defined $outStr) {
+            $outStr = 'Critical are: ';
+        } else {
+            $outStr .= '; Critical are: ';
+        }
+        foreach (@critList) {
+            $instName = $_;
+            $outStr .= $_ . ', ';
+        } 
+        chop $outStr;
+        chop $outStr;
+    }
+
+    if (scalar(@warnList) > 0) {
+        setResult(WARNING);
+        unless (defined $outStr) {
+            $outStr = 'Warning are: ';
+        } else {
+            $outStr .= '; Warning are: ';
+        }
+        foreach (@warnList) {
+            $instName = $_;
+            $outStr .= $_ . ', ';
+        } 
+        chop $outStr;
+        chop $outStr;
+    }
+
+    if (scalar(@okList) > 0) {
+        setResult(OK);
+
+        if (defined $ressource and $ressource eq 'sensor') {
+            $outStr .= "No problems reported for remaining sensors.";
+        } elsif (defined $ressource and $ressource eq 'mpath') {
+            $outStr .= "No problems reported for remaining mpaths.";
+        } else {
+            unless (defined $outStr) {
+                $outStr = 'Ok are: ';
+            } else {
+                $outStr .= '; Ok are: ';
+            }
+            foreach (@okList) {
+                $instName = $_;
+                $outStr .= $_ . ', ';
+            } 
+            chop $outStr;
+            chop $outStr;
+        }
+    }
+
+    $np->nagios_exit($finalResult, $label . ' ' . $outStr);
+}
+
+sub addToResultLists {
+    my $instState = shift;
+    my $instName  = shift;
+    my $match     = 0;
+
+    # excludeList
+    if (@exList) {
+        foreach (@exList) {
+            return if ($instName =~ /$_/);
+        }
+    }
+
+    # includeList
+    if (@inList) {
+        foreach (@inList) {
+            $match = 1 if ($instName =~ /$_/);
+        }
+        return unless ($match);
+    } 
+ 
+    # adding the instances to the lists
+    if ($instState == OK) {
+        push (@okList, $instName);
+    }
+
+    if ($instState == WARNING) {
+        push (@warnList, $instName);
+    }
+
+    if ($instState == CRITICAL) {
+        push (@critList, $instName);
+    }
+}
+
+
+# The simplest check of all: a single state is checked.
+sub checkSimpleState {
+    my $_mode = shift;
+    my $_host = shift;
+    my $_result = $hostStates{$_host}->{$_mode};
+    
+    if (defined $np->opts->list) {
+        $np->nagios_exit(UNKNOWN, "--list|-l is not supported in \'$_mode\' mode");
+    }
+
+    unless (defined $_result) {
+        $np->nagios_exit(CRITICAL, "Unable to determine state of $_mode");
+    }
+
+    $np->nagios_exit(getState($_result), "$_mode is in state $_result");
+}
+
+
+# A state of a instance from a list of instances is checked.
+sub checkState {
+    #e.g. checkState('memory', $instName, $host);
+    my $_mode = shift;
+    my $_name = shift;
+    my $_host = shift;
+    my $_result;
+    my $instName;
+    my $instList = "$_host: ";
+
+    foreach my $_inst (keys %{$hostStates{$_host}->{$_mode}}) {
+        $instList .= "[$_inst] ";
+        if (defined $_name and $_name ne '') {
+            next unless ($_inst =~ /^$_name$/);
+        }
+        $instName = $_inst;
+        $_result = getState(${$hostStates{$_host}->{$_mode}}{$_inst});
+        addToResultLists($_result, $_inst);
+    }
+
+    if (defined $np->opts->list) {
+        $np->nagios_exit(OK, "Available $_mode devices: $instList");
+    }
+
+    unless (defined $_result) {
+        $np->nagios_exit(CRITICAL, "Unable to find device instance");
+    }
+   
+    if (defined $_name and $_name ne '') {
+        $np->nagios_exit($_result, $instName . ' has state ' . ${$hostStates{$_host}->{$_mode}}{$instName});
+    }
+ 
+    evalListsAndExit(); 
+}
+
+
+# Checks a datastore of a list of datastores. Thresholds are respected,
+# performance data is used in the output.
+sub checkDatastore {
+    my $_name = shift;
+    my $_host = shift;
+    my $_freeCapa;
+    my $_usedPercent;
+    my $_usedCapa;
+    my $_totalCapa;
+    my $_dataStoreName;
+    my $dataStoreList = "$_host: ";
+    my $usePercent = 0;
+    my $percentWarn;
+    my $percentCrit;
+
+    unless (defined $np->opts->list) {
+        if ((not defined $np->opts->warning) or (not defined $np->opts->critical)) {
+        $np->nagios_exit(UNKNOWN, 'For datastore monitoring thresholds '
+                                . '(--warning|-w, --critical|-c) are needed.');
+        }
+    
+        if (($np->opts->warning =~ /%/ and not $np->opts->critical =~ /%/)
+            or ($np->opts->critical =~ /%/ and not $np->opts->warning =~ /%/)) {
+            $np->nagios_exit(UNKNOWN, 'Either both, --warning|-w and --critcal|-c use'
+                                        . ' percentage values or both dont.');
+        }
+    
+        if ($np->opts->warning =~ /%/) {
+            $usePercent  = 1;
+            $percentWarn = $np->opts->warning;
+            $percentWarn =~ s/%//; # deletes the '%'
+            $percentCrit = $np->opts->critical;
+            $percentCrit =~ s/%//; # deletes the '%'
+        }
+    }
+ 
+    foreach my $vmStore (keys %{$hostStates{$host}->{vmstore}}) {
+        my $_result;
+        $dataStoreList .= "[$vmStore] ";
+        if (defined $_name and $_name ne '') {
+            next unless($vmStore =~ /^$_name$/);
+        }
+
+        $_dataStoreName = $vmStore;
+        $_usedPercent = sprintf ("%.2f", 100 - $hostStates{$host}->{vmstore}->{$vmStore}->{freespace} 
+                                               / $hostStates{$host}->{vmstore}->{$vmStore}->{capacity} 
+                                               * 100);
+        $_freeCapa = bytesToGb($hostStates{$host}->{vmstore}->{$vmStore}->{freespace});
+        $_usedCapa = bytesToGb($hostStates{$host}->{vmstore}->{$vmStore}->{capacity} 
+                                - $hostStates{$host}->{vmstore}->{$vmStore}->{freespace});
+        $_totalCapa = bytesToGb($hostStates{$host}->{vmstore}->{$vmStore}->{capacity});
+
+        if ($usePercent) {
+            $_result = $np->check_threshold(check => $_usedPercent, warning => $percentWarn, critical => $percentCrit);
+        } else {
+            $_result = $np->check_threshold($_usedCapa);
+        }
+
+        addToResultLists($_result, $_dataStoreName . " (${_usedPercent}% used)");
+    }
+
+    if (defined $np->opts->list) {
+        $np->nagios_exit(OK, "Available datastores: $dataStoreList");
+    }
+
+    if (not defined $_usedPercent or not defined $_freeCapa or not defined $_dataStoreName) {
+        $np->nagios_exit(CRITICAL, "Unable to find datastore named $_dataStoreName");
+    }
+
+    if (defined $_name and $_name ne '') { 
+        if ($usePercent) {
+            $np->add_perfdata(label     => $_dataStoreName,
+                              value     => $_usedPercent,
+                              uom       => '%',
+                              warning   => $percentWarn,
+                              critical  => $percentCrit,
+                              min       => 0,
+                              max       => 100);
+            $np->nagios_exit($np->check_threshold(check    => $_usedPercent, 
+                                                  warning  => $percentWarn, 
+                                                  critical => $percentCrit), 
+                            "$_dataStoreName (${_totalCapa}GB): full by $_usedPercent% "
+                            . "(${_usedCapa}GB) - ${_freeCapa}GB still free.");
+        } else {
+            $np->add_perfdata(label     => $_dataStoreName,
+                              value     => $_usedCapa,
+                              uom       => 'GB',
+                              warning   => $np->opts->warning,
+                              critical  => $np->opts->critical,
+                              min       => 0,
+                              max       => $_totalCapa);
+    
+            $np->nagios_exit($np->check_threshold($_usedCapa),
+                            "$_dataStoreName (${_totalCapa}GB): used: ${_usedCapa}GB "
+                            . "(${_usedPercent}%) - ${_freeCapa}GB still free.");
+        }
+    } else {
+        evalListsAndExit();
+    }
+}
+
+
+
+# Checks all paths of a LUN
+sub checkMpathState {
+    my $_name = shift;
+    my $_host = shift;
+    my $lunName;
+    my $lunList = "$_host: ";
+    $_name = undef if ($_name eq '');
+
+    foreach my $_lun (keys %{$hostStates{$_host}->{luns}}) {
+        my @okPaths;
+        my @warnPaths;
+        my @critPaths;
+        my $hasActive = 0;
+        my $result;
+        my $okCount = 0;
+        my $warnCount = 0;
+
+        $lunList .= "[$_lun] ";
+        # if a single lun is defined, this loop just proceeds if the name mathes
+        if (defined $_name and $_name ne '') {
+            next unless ($_lun =~ /$_name/);
+            $label = 'Lun: ' . $_lun . ':';
+        }
+        $lunName = $_lun;
+
+        # all paths get inspected and pushed into appropriate lists
+        foreach my $path (keys %{$hostStates{$_host}->{luns}->{$_lun}}) {
+            my $pathState = ${$hostStates{$host}->{luns}->{$_lun}}{$path};
+            if ($pathState eq 'active') {
+                $hasActive = 1;
+            }
+
+            my $pathNagState = getState($pathState);
+            if ($pathNagState == OK) {
+                $okCount++; 
+                push (@okPaths, $path . ' (' . $pathState . ')');
+            } elsif ($pathNagState == WARNING) {
+                $warnCount++;
+                push (@warnPaths, $path . ' (' . $pathState . ')');
+            } elsif ($pathNagState == CRITICAL) {
+                $warnCount++; # this is by purpose warnCount 
+                push (@critPaths, $path . ' (' . $pathState . ')');
+            } else {
+                $np->nagios_exit(UNKNOWN, 'Unable to determine state of lun ' 
+                                . $lunName . '\'s path ' . $path);
+            }
+        }
+       
+        if (defined $_name) {
+            $result .= "Lun $lunName\'s paths: ";
+        }
+
+        if (@critPaths) {
+            $result .= 'Critical: ';
+            foreach (@critPaths) {
+                $result .= "$_, ";
+            }
+            chop $result;
+            chop $result;
+        }
+
+        if (@warnPaths) {
+            $result .= 'Warning: ';
+            foreach (@warnPaths) {
+                $result .= "$_, ";
+            }
+            chop $result;
+            chop $result;
+        }
+
+        if (@okPaths) {
+            $result .= 'Ok: ';
+            foreach (@okPaths) {
+                $result .= "$_, ";
+            }
+            chop $result;
+            chop $result;
+        }
+
+        # for a single lun we are done 
+        if (defined $_name) {
+            $np->nagios_exit($np->check_threshold($okCount), $result);
+        }
+
+        unless ($hasActive) {
+            addToResultLists(CRITICAL, 'Lun ' . $lunName . '\'s paths: ' . $result);
+        } else {
+            unless ($warnCount) {
+                addToResultLists(OK, 'Lun ' . $lunName . '\'s paths: ' . $result);
+            } else {
+                addToResultLists(WARNING, 'Lun ' . $lunName . '\'s paths: ' . $result);
+            }
+        }
+    }
+
+    if (defined $np->opts->list) {
+        $np->nagios_exit(OK, "Available LUNs: $lunList");
+    }
+
+    unless (defined $lunName) {
+        $np->nagios_exit(CRITICAL, "Unable to find lun named $_name");
+    }
+
+    evalListsAndExit();
+}
+
+# A sensor of a list of sensors is checked. No thresholds are used,
+# due to the fact that sensors have their own states (Green, ok, and so on...).
+# Perfdata is generated.
+sub checkSensor {
+    my $_name = shift;
+    my $_host = shift;
+    my $_result;
+    my $_uom;
+    my $resState;
+    my $unitModifier;
+    my $sensorList = "$_host: ";
+    my $sensorName = undef;
+    
+    if (defined $np->opts->warning or defined $np->opts->critical) {
+        $np->nagios_exit(UNKNOWN, 'No thresholds are used for sensors, they have a definite state.');
+    }
+
+    foreach my $_sensor (keys %{$hostStates{$_host}->{sensors}}) {
+        $sensorList .= "[$_sensor] ";
+        if (defined $_name and $_name ne '') {
+            next unless ($_sensor =~ /$_name/);
+        }
+
+        $resState = $hostStates{$_host}->{sensors}->{$_sensor}->{state};
+        $unitModifier = $hostStates{$_host}->{sensors}->{$_sensor}->{unitModifier};
+        $_result = $hostStates{$_host}->{sensors}->{$_sensor}->{value} * 10**$unitModifier;
+        $_uom = $hostStates{$_host}->{sensors}->{$_sensor}->{baseUnits};
+        $sensorName = $_sensor;
+        addToResultLists(getState($resState), $sensorName);
+    }
+
+    if (defined $np->opts->list) {
+        $np->nagios_exit(OK, "Available sensors: $sensorList");
+    }
+
+    unless (defined $_result) {
+        $np->nagios_exit(CRITICAL, "Unable to find sensor named $_name");
+    }
+
+    if (defined $_name and $_name ne '') {
+        $np->add_perfdata(label     => $sensorName,
+                          value     => $_result,
+                          uom       => $_uom,
+                          warning   => 0,
+                          critical  => 0,
+                          min       => 0,
+                          max       => 0);
+        $np->nagios_exit(getState($resState), "[$sensorName] has a value of \'$_result\' $_uom and therefore has state \'$resState\'");
+    } else {
+        evalListsAndExit();
+    }
+}
+
+# A perfcounter of a list of perf counters is checked.
+# Threshold are respected if supplied, performance data is generated.
+sub checkPerfCounter {
+    my $_name = shift;
+    my $counterList;
+    my $_result;
+    my $counterName;
+    my $_uom = '';
+    my $max = 0;
+
+
+    unless (defined $np->opts->list) {
+        if (not defined $np->opts->name or $np->opts->name eq '') {
+            $np->nagios_exit(UNKNOWN, '--name|-n must be specified for perf counter monitoring');
+        }
+
+        if (not defined $np->opts->warning) {
+            $np->nagios_exit(UNKNOWN, '--warning|-w must be specified for perf counter monitoring');
+        }
+
+        if (not defined $np->opts->critical) {
+            $np->nagios_exit(UNKNOWN, '--critical|-c must be specified for perf counter monitoring');
+        }
+    }
+
+    foreach my $_host (keys %hostPerfCounter) {
+        $counterList .= " ${_host}: ";
+        foreach my $_counter (keys %perfCounterInfo) {
+            $counterList .= "[$_counter] ";
+            next unless ($_counter eq $_name);
+            $counterName = $_counter;
+            $_result = $hostPerfCounter{$_host}->{$_counter};
+            $_uom = $perfCounterInfo{$_counter}->{unitInfo};
+        }
+    }
+
+    if (defined $np->opts->list) {
+        $np->nagios_exit(OK, "Available performance counter:$counterList");
+    }
+
+    unless (defined $_result) {
+        $np->nagios_exit(CRITICAL, "Unable to find performance counter named $_name");
+    }
+
+    ($_result, $_uom) = scaleValue($_result, $_uom);
+    $max = 100 if ($_uom =~ /%/);
+    
+    $np->add_perfdata(label     => $counterName,
+                      value     => $_result,
+                      uom       => $_uom,
+                      warning   => $np->opts->warning,
+                      critical  => $np->opts->critical,
+                      min       => 0,
+                      max       => $max);
+    $np->nagios_exit($np->check_threshold($_result), "$_result$_uom $counterName");
+}
+
+
+# Simply divides a value through 1073741824 (= 1024 * 1024 * 1024)
+# and returns it.
+sub bytesToGb {
+    my $_bytes = shift;
+    return sprintf("%.2f", ($_bytes / 1073741824));
+}
+
+# Goes through all perfCounter and determines their IDs. Writes them into
+# the corresponding data structure (provided with a ref
+# locally called $demands).
+#
+# @param:   1st ref to perfManager
+#           2nd hash ref that contains needed fields. See definition of
+#                %perfCounterInfo for more details.
+sub getAllPerfCountIds {
+    my $perfManager = shift;
+    my $demands     = shift;
+    my $counterList = $perfManager->perfCounter;
+    foreach my $mode ( keys %$demands ) {
+        foreach my $counter (@$counterList) {
+            unless ( $counter->groupInfo->key eq $$demands{$mode}->{groupInfo} )
+            {
+                next;
+            }
+            unless (
+                   $counter->rollupType->val eq $$demands{$mode}->{rollupType} )
+            {
+                next;
+            }
+            unless ( $counter->nameInfo->key eq $$demands{$mode}->{nameInfo} ) {
+                next;
+            }
+
+            # here we have only hits left
+            $$demands{$mode}->{id}       = $counter->key;
+            $$demands{$mode}->{unitInfo} = $counter->unitInfo->key;
+        }
+        unless ( defined $$demands{$mode}->{id} ) {
+            secureNagiosExit(CRITICAL, "Unable to get ID for $mode");
+        }
+    }
+}
+
+
+# recalculates a given value depending on the unit information provided
+sub scaleValue {
+    my $value    = shift;
+    my $unitInfo = shift;
+    
+    ### --- this is for performance counter --- ###
+    #
+
+    # cutting off anything behind the comma
+    $value = (split(/,/, $value))[0];
+
+    # network traffic does not get translated
+    if ($unitInfo eq 'kiloBytesPerSecond') {
+        return ($value, $unitInfo); 
+    }
+    
+    # here we return MB
+    if ($unitInfo eq 'kiloBytes') {
+        return (sprintf("%.2f", $value / 1024), 'MB');
+    }
+    
+    # numbers are just that
+    if ($unitInfo eq 'number') {
+        return ($value, $unitInfo);
+    }
+    
+    # percent are always multiplied by 100 (10**2), 
+    # so we divied them by 100
+    if ($unitInfo eq 'percent') {
+        return ($value / 100, '%');
+    }
+    
+    # MHz
+    if ($unitInfo eq 'megaHertz') {
+        return (sprintf("%.2f" , $value), $unitInfo);
+    }
+    
+    # milliseconds
+    if ($unitInfo eq 'millisecond') {
+        if ($value == 1) {
+            return ($value, 'millisecond');
+            }
+        return ($value, 'milliseconds'); 
+    }
+
+    ### --- this is if called with a unitModifier --- ###
+    #
+    # matches all 'simple' floating-numbers
+    if ($unitInfo =~ /^[+-]?\d+\.?\d*$/) {
+        return ($value * 10**$unitInfo, $unitInfo);
+    }
+
+    # no match
+    return undef;
+}
+
+
+
+# Collects all values for known IDs.
+#
+# @param:   1st: ref to perf-manager
+#           2nd: name of host to collect the perfcounter
+#
+sub getAllPerfCountVals {
+    my $perfManager = shift;
+    my $host        = shift;    # just one host
+    my @perfIds;
+    my $perfData;
+    my $perfQuerySpec;
+    my $valueTemp;
+
+    # TODO hier muss noch zwischen VM, Host und DC unterschieden werden
+    my $hostView = getHostView($host);
+    unless ($hostView) {
+        secureNagiosExit(CRITICAL, "Unable to retrieve data for host \'$host\'");
+    }
+
+    # Foreach ressource that should be monitored a PerfMetricId object is created
+    # and added to an array that is, a few lines later, passed to the query.
+    foreach (keys %perfCounterInfo) {
+        unless (defined $perfCounterInfo{$_}->{id}) {
+            secureNagiosExit(CRITICAL,
+                      "Unable to retrieve ID for performance counter $_" );
+        }
+        push(@perfIds, PerfMetricId->new(counterId => $perfCounterInfo{$_}->{id},
+                                         instance  => $perfCounterInfo{$_}->{instance}));
+    }
+    $perfQuerySpec = PerfQuerySpec->new(entity     => $hostView,
+                                        format     => 'csv',
+                                        intervalId => 20,
+                                        metricId   => \@perfIds,
+                                        maxSample  => 1);
+
+    # there is just one host, so we get just one elemnt back
+    $perfData = $perfManager->QueryPerf(querySpec => [$perfQuerySpec]);
+
+    foreach my $_host (@$perfData) {
+        foreach my $_counter (@{$_host->value})
+        {    # here all counter values got inspected
+            foreach my $key (keys %perfCounterInfo) {
+                if ($perfCounterInfo{$key}->{id} == $_counter->id->counterId) {
+
+                    # ESX 4.x hosts provide two values, comma separated.
+                    # Due to compatibility reasons only the first one is used
+                    if ($_counter->value =~ /^\d+,\d+$/) {
+                        $valueTemp = (split(/,/, $_counter->value))[0];
+                    # ESX 3.x
+                    } else {
+                        $valueTemp = $_counter->value;
+                    }
+
+                    $hostPerfCounter{$host}->{$key} = $valueTemp;
+                }
+            }
+        }
+    }
+}
+
+# Returns a reference to an array which contains a vm-view object
+# for ervery vm found on the given host.
+# @param: reference to a host-view object of esx host that hosts the wanted vms
+sub getVmView {
+    my $hostView = shift;
+    return Vim::find_entity_views(view_type => 'VirtualMachine', 
+                                  begin_entity => $hostView);
+}
+
+# TODO
+sub getDcView {
+
+    #do smthng
+}
+
+# Calls either getHostViewByName or getHostViewByIp
+# @param: hostname or -ip
+sub getHostView {
+    my $id = shift;
+    if ( $id =~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/ ) {
+        return getHostViewByIp($id);
+    }
+    return getHostViewByName($id);
+}
+
+
+# Returns a view object of the given hostname
+# @param: hostname
+sub getHostViewByName {
+    my $host = shift;
+    my $hostName;
+    my $view;
+
+    # if the hostname contains a domain, we have to cut of the domain part
+    if ( $host =~ /.+\./ ) {
+        $hostName = ( split( /\./, $host ) )[0];
+    } else {
+        $hostName = $host;
+    }
+
+    # here we fetch the first HostSystem object matching hostName
+    $view = Vim::find_entity_view( view_type => 'HostSystem',
+                                   filter    => { name => qr/^$hostName/i } );
+    unless ( defined $view ) {
+        return 0;
+    }
+    return $view;
+}
+
+
+# Returns a view object of the given ip address
+# @param: ip address
+sub getHostViewByIp {
+    my $hostIp = shift;
+    my $views;
+
+    # all HostSystem objects available are fetched
+    $views = Vim::find_entity_views(view_type => 'HostSystem');
+
+    unless (defined $views) {
+        syslogThis('ERROR: kann hostview nicht abrufen');
+        exit 0;
+    }
+
+    # in case we receive more than one hostSystem-object, we have to be sure
+    # that we got the right one, so we search for the one with the right ip here
+    foreach my $tempView (@{$views}) {
+        return $tempView;
+        # digging for the ip
+        my $ip = ${${$tempView->config->network->consoleVnic}[0]->spec->ip}{ipAddress};
+        # return first match
+        if ($ip eq $hostIp) {
+            return $tempView;
+        }
+   }
+    return 0;
+}
+
+
+# Traverses a host-view object and collects all needed values
+# @param: name or ip address of the host whoose attributes shall be monitored
+sub getAllHostStates {
+    my $host     = shift;
+    my $hostView = getHostView($host);
+    my $tmpRef;
+
+    # this investigates the sensor types
+    $tmpRef = $hostView->summary->runtime->healthSystemRuntime
+                ->systemHealthInfo->numericSensorInfo;
+                
+    foreach my $sensor (@$tmpRef) {
+        if ($sensor->name =~ /Not\s+Installed/i) {
+            next;
+        }
+        $hostStates{$host}->{sensors}->{ $sensor->name }->{type} =
+          $sensor->sensorType;
+        $hostStates{$host}->{sensors}->{ $sensor->name }->{state} =
+          $sensor->healthState->key;
+        $hostStates{$host}->{sensors}->{ $sensor->name }->{value} =
+          $sensor->currentReading;
+        $hostStates{$host}->{sensors}->{ $sensor->name }->{unitModifier} =
+          $sensor->unitModifier;
+        $hostStates{$host}->{sensors}->{ $sensor->name }->{baseUnits} =        
+          $sensor->baseUnits 
+            ? $sensor->baseUnits
+              : '';
+    }
+
+    # this investigates the luns paths
+    $tmpRef = $hostView->config->storageDevice->multipathInfo->lun;
+    foreach my $lun (@$tmpRef) {
+        foreach my $path (@{$lun->path}) {
+            $hostStates{$host}->{luns}->{$lun->id}->{$path->name} =
+              $path->pathState;
+        }
+    }
+
+    # this gets the controller states
+    eval {
+        $tmpRef =
+          $hostView->summary->runtime->healthSystemRuntime->hardwareStatusInfo
+          ->storageStatusInfo;
+    };
+    unless ($@) {
+        foreach my $storage (@$tmpRef) {
+            if ($storage->name =~ /controller/i) {
+                $hostStates{$host}->{controllers}->{$storage->name} =
+                  $storage->status->key;
+            }
+        }
+    }
+
+    # this gets the bus adapters states
+    eval { $tmpRef = $hostView->config->storageDevice->hostBusAdapter; };
+    unless ($@) {
+        foreach my $adapter (@$tmpRef) {
+            $hostStates{$host}->{adapters}->{$adapter->device} =
+              $adapter->status;
+        }
+    }
+
+    # this gets the memorys health status
+    eval {
+        $tmpRef =
+          $hostView->runtime->healthSystemRuntime->hardwareStatusInfo
+          ->memoryStatusInfo;
+    };
+    unless ($@) {
+        foreach my $memDev (@$tmpRef) {
+            $hostStates{$host}->{memory}->{$memDev->name} =
+              $memDev->status->key;
+        }
+    }
+
+    # this gets the scsis disks health states
+    eval { $tmpRef = $hostView->config->storageDevice->scsiLun; };
+    unless ($@) {
+        foreach my $scsiLun (@$tmpRef) {
+            $hostStates{$host}->{scsi}->{$scsiLun->canonicalName} =
+              @{$scsiLun->operationalState}[0];
+        }
+    }
+
+    # this gets ths cpus health states
+    eval {
+        $tmpRef =
+          $hostView->runtime->healthSystemRuntime->hardwareStatusInfo
+          ->cpuStatusInfo;
+    };
+    unless ($@) {
+        foreach my $_cpuState (@$tmpRef) {
+            $hostStates{$host}->{cpuhealth}->{$_cpuState->name} =
+              $_cpuState->status->key;
+        }
+    }
+
+    # this collects some general runtime information. Most of them are
+    # provided by all esx-hosts, so that no evals are needed.
+    $hostStates{$host}->{connectionState} = $hostView->runtime->connectionState->val;
+    if ($hostView->runtime->inMaintenanceMode == 0) {
+        $hostStates{$host}->{maintenance} = 'noMaint'
+    } else {
+        $hostStates{$host}->{maintenance} = 'maint'
+    }
+    $hostStates{$host}->{overallState} = $hostView->overallStatus->val;
+
+    # this collects vm states 
+    my $vmViews = getVmView($hostView);
+    if (defined $vmViews) {
+        foreach my $vm (@{$vmViews}) {
+            $hostStates{$host}->{vmPowerState}->{$vm->name} = $vm->runtime->powerState->val;
+        }
+    }
+    
+    # this searches for configuration issues of the vms on that host
+    my $issues = $hostView->configIssue;
+    if (defined $issues) {
+        foreach my $issue (@{$issues}) {
+            my $msg = '';
+            eval {
+                 $msg = $issue->fullFormatedMessage;
+            };
+            unless (defined $@) {
+                $hostStates{$host}->{vmConfigIssues}->{$issue->vm->name} = $msg;
+            }
+        }
+    }
+    
+    # this collects infomation about the state of services
+    my $serviceSystem = Vim::get_view(mo_ref => $hostView->configManager->serviceSystem);
+    my $services = $serviceSystem->serviceInfo->service;
+    foreach my $service (@{$services}) {
+        if ($service->running) {
+            $hostStates{$host}->{services}->{$service->key} = 'running';
+        } else {
+            $hostStates{$host}->{services}->{$service->key} = 'notRunning';
+        }        
+    }
+
+    # this gets all vm volume infos
+    foreach my $dataStore (@{$hostView->datastore}) {
+        my $store = Vim::get_view(mo_ref => $dataStore);
+        my $name = $store->summary->name;
+        $hostStates{$host}->{vmstore}->{$name}->{capacity}  = $store->summary->capacity;
+        $hostStates{$host}->{vmstore}->{$name}->{freespace} = $store->summary->freeSpace;
+    }
+}
+
+# This is for debugging only and prints out all status data collected on a host
+# @param: 1st: name or ip of host whoose values should be printed
+#         2nd: type of value that should be printed (e.g. sensors).  
+sub printHostStates {
+    my $host = shift;
+    my $type = shift;
+
+    if ( $type eq 'sensors' ) {
+        foreach my $_sensor ( keys %{ $hostStates{$host}->{sensors} } ) {
+            my $unitModifier = $hostStates{$host}->{sensors}->{$_sensor}->{unitModifier};
+            print "Sensor $_sensor\n";
+            print "  is type:   "
+              . $hostStates{$host}->{sensors}->{$_sensor}->{type} . "\n";
+            print "  has state: "
+              . $hostStates{$host}->{sensors}->{$_sensor}->{state} . "\n";
+            print "  has bulk value: "
+              . $hostStates{$host}->{sensors}->{$_sensor}->{value} . "\n";#* 10**$unitModifier . "\n";
+            print "  value recalculated: " . $hostStates{$host}->{sensors}->{$_sensor}->{value} * 10**$unitModifier . "\n";
+            print "  unitModifier: $unitModifier\n";
+            print "  baseUnits: " . $hostStates{$host}->{sensors}->{ $_sensor}->{baseUnits} . "\n";
+            print "\n";            
+        }
+    } elsif ( $type eq 'luns' ) {
+        foreach my $_id ( keys %{ $hostStates{$host}->{luns} } ) {
+            print "Lun-ID $_id:\n";
+            foreach my $path ( keys %{ $hostStates{$host}->{luns}->{$_id} } ) {
+                print " Path  $path has state ";
+                print ${ $hostStates{$host}->{luns}->{$_id} }{$path} . "\n";
+            }
+        }
+        print "\n";
+    } elsif ( $type eq 'controllers' ) {
+        foreach my $_cont ( keys %{ $hostStates{$host}->{controllers} } ) {
+            print "Controller \'$_cont\' \n  is in state "
+              . ${ $hostStates{$host}->{controllers} }{$_cont} . "\n";
+        }
+        print "\n";
+    } elsif ( $type eq 'adapters' ) {
+        foreach my $_adapter ( keys %{ $hostStates{$host}->{adapters} } ) {
+            print "Adapter \'$_adapter\' \n  is in state "
+              . ${ $hostStates{$host}->{adapters} }{$_adapter} . "\n";
+        }
+        print "\n";
+    } elsif ( $type eq 'memhealth' ) {
+        foreach my $_mem ( keys %{ $hostStates{$host}->{memory} } ) {
+            print "Memory device \'$_mem\' \n  is in state "
+              . ${ $hostStates{$host}->{memory} }{$_mem} . "\n";
+        }
+        print "\n";
+    } elsif ( $type eq 'scsi' ) {
+        foreach my $_scsi ( keys %{ $hostStates{$host}->{scsi} } ) {
+            print "SCSI controller \'$_scsi\' \n  is in state "
+              . ${ $hostStates{$host}->{scsi} }{$_scsi} . "\n";
+        }
+        print "\n";
+    } elsif ( $type eq 'cpuHealth' ) {
+        foreach my $_cpu ( keys %{ $hostStates{$host}->{cpuhealth} } ) {
+            print "CPU \'$_cpu\' \n  is in state "
+              . ${ $hostStates{$host}->{cpuhealth} }{$_cpu} . "\n";
+        }
+        print "\n";
+    } elsif ($type eq 'runtimeInfo') {
+        print 'Connection is in state: ' . $hostStates{$host}->{connectionState} . "\n";
+        print 'Maintenance seams to be necessary: ' . $hostStates{$host}->{maintenance} . "\n";
+        print 'Overall state is: ' . $hostStates{$host}->{overallState} . "\n";
+        print "VM states list:\n";
+        foreach my $vm (keys %{$hostStates{$host}->{vmPowerState}}) {
+            print '  VM' . $vm . ' is ' . $hostStates{$host}->{vmPowerState}->{$vm} . "\n";
+        }
+        foreach my $issue (keys %{$hostStates{$host}->{vmConfigIssues}}) {
+            print ' VM ' . $issue . 'has an config issue: ' . $hostStates{$host}->{vmConfigIssues}->{$issue} . "\n";
+        }
+        print "\n";
+    } elsif ($type eq 'services') {
+        foreach my $service (keys %{$hostStates{$host}->{services}} ) {
+           print "Service $service is " . $hostStates{$host}->{services}->{$service} . "\n";
+        }
+        print "\n";
+    } elsif ( $type eq 'vmStores' ) {
+        foreach my $vmStore (keys %{$hostStates{$host}->{vmstore}} ) {
+            print $vmStore . " is full by " . sprintf ("%.2f", ($hostStates{$host}->{vmstore}
+                                                ->{$vmStore}->{freespace} 
+                                              / $hostStates{$host}->{vmstore}
+                                               ->{$vmStore}->{capacity}
+                                              ) * 100 )
+                           . "\%, free space left: " . $hostStates{$host}
+                                                    ->{vmstore}->{$vmStore}
+                                                    ->{freespace}
+                           . "\n";
+        }
+    }
+}
+
+
+# This is for debugging only and prints out all performance data values
+# collected on a host. Reads directly from the global var %hostPerfCounter. 
+sub printHostPerfCounts {
+    foreach my $__host (keys %hostPerfCounter) {
+        print "Host: $__host:\n";
+        foreach my $__counter (keys %perfCounterInfo) {
+
+            #    foreach my $__counter (keys %{$hostPerfCounter{$__host}}) {
+            print "  $__counter is at "
+              . $hostPerfCounter{$__host}->{$__counter} . " "
+              . $perfCounterInfo{$__counter}->{unitInfo} . "(s)\n";
+            print '     GroupInfo:  ' . $perfCounterInfo{$__counter}->{groupInfo}  . "\n";
+            print '     RollupType: ' . $perfCounterInfo{$__counter}->{rollupType} . "\n";
+            print '     NameInfo:   ' . $perfCounterInfo{$__counter}->{nameInfo}   . "\n";
+            print '     ID:         ' . $perfCounterInfo{$__counter}->{id}         . "\n";
+            print '     UnitInfo:   ' . $perfCounterInfo{$__counter}->{unitInfo}   . "\n\n";
+        }
+    }
+    print "\n";
+}
+
+# For debugging only. Calls printHostStates multiple times.
+sub printAllHostStates {
+    my $host = shift;
+    printHostStates($host, 'sensors');
+    printHostStates($host, 'luns');
+    printHostStates($host, 'controllers');
+    printHostStates($host, 'adapters');
+    printHostStates($host, 'memhealth');
+    printHostStates($host, 'scsi');
+    printHostStates($host, 'cpuHealth');
+    printHostStates($host, 'runtimeInfo');
+    printHostStates($host, 'services');
+    printHostStates($host, 'vmStores');
+}
+
+
+
+# Transforms any given state to a nagios compatible state.
+# Due to the fact that a nagios-unknown state should be reserverd for
+# config errors, all vmware-unknowns are translated to nagios-warnings.
+sub getState {
+    my $foreignState = lc(shift);
+
+    # possible sensor states 
+    if ($foreignState eq 'green') {
+        return OK;
+    } 
+    if ($foreignState eq 'yellow') {
+        return WARNING;        
+    }
+    if ($foreignState eq 'red') {
+        return CRITICAL;
+    }
+    if ($foreignState eq 'unknown') {
+        return WARNING;
+    } 
+    if ($foreignState eq 'active') {
+        return OK;        
+    }
+    if ($foreignState eq 'dead') {
+        return CRITICAL;        
+    }
+    if ($foreignState eq 'disabled') {
+        return WARNING;
+    }
+    if ($foreignState eq 'standby') {
+        return OK;
+    }
+
+    # general ManagedEntityStatus that may be possible
+    if ($foreignState eq 'gray') {
+        return WARNING;
+    } 
+
+    # possible scsiLunStates
+    if ($foreignState eq 'degraded') {
+        return WARNING; 
+    }
+    if ($foreignState eq 'error') {
+        return CRITICAL;
+    }
+    if ($foreignState eq 'lostcommunication') {
+        return CRITICAL;
+    }
+    if ($foreignState eq 'ok') {
+        return  OK;
+    }
+    if ($foreignState eq 'unknownstate') {
+        return WARNING;
+    } 
+    
+    # host connection state
+    if ($foreignState eq 'connected') {
+        return OK;
+    }
+    if ($foreignState eq 'disconnected') {
+        return CRITICAL;
+    }
+    if ($foreignState eq 'notresponding') {
+        return CRITICAL;
+    } 
+    
+    # Maintenance modes (self defined)
+    if ($foreignState eq 'nomaint') {
+        return OK;
+    }
+    if ($foreignState eq 'maint') {
+        return WARNING; 
+    } 
+    
+    # vm states
+    if ($foreignState eq 'poweredon') {
+        return OK;
+    }
+    if ($foreignState eq 'poweredoff') {
+        return CRITICAL;
+    }
+    if ($foreignState eq 'suspended') {
+        return WARNING;
+    } 
+    
+    # service states (self defined)
+    if ($foreignState eq 'running') {
+        return OK;
+    }
+    if ($foreignState eq 'notrunning') {
+        return CRITICAL;
+    }
+
+    # possible HBA state
+    if ($foreignState eq 'online') {
+        return OK;
+    }
+
+    # If a state is not contained in the list above, this is worth a crit.
+    return CRITICAL;
+}
+
+
+sub daemonRun {
+
+    my $daemonize = 0;
+    my @pidFileCont;
+    my $daemonInterval = $np->opts->checkInterval;
+    my $error          = $statusCache->getError();
+
+    # at first the cache-lock is remmoved, otherwise the plugin would remove
+    # the lock from the cache (both, plugin and daemon hold a cache lock after fork)
+    $statusCache->unlockAll();
+    
+    # removing all refs to the statusCache object for object destruction
+    $statusCache = undef;
+
+    # check if a daemon is already running
+    if (-e $pidFile) {
+        unless (isCheckDaemon(getPidFromFile($pidFile))) {
+                $daemonize = 1;
+        }
+    } else {
+        $daemonize = 1;
+    }
+   
+    unless ($daemonize) {
+        
+        if ($error) {
+            secureNagiosExit(CRITICAL, $error);
+        }
+
+        secureNagiosExit(WARNING, 'ESX check daemon is already running, '
+                        . 'but no data was found, or it has reached time '
+                        . 'limit. This is normal behaviour at startup but '
+                        . 'indicates an error when lasting longer');
+    }
+
+    #
+    ################### daemon starts here ########################
+    #
+    # Double fork reason:
+    # Fork a second child and exit immediately to prevent zombies.  This
+    # causes the second child process to be orphaned, making the init
+    # process responsible for its cleanup.  And, since the first child is
+    # a session leader without a controlling terminal, it's possible for
+    # it to acquire one by opening a terminal in the future (System V-
+    # based systems).  This second fork guarantees that the child is no
+    # longer a session leader, preventing the daemon from ever acquiring
+    # a controlling terminal.
+
+    my $pid = fork();
+    unless (defined $pid) {
+        secureNagiosExit(CRITICAL, "Unable to fork: $!");
+    } 
+
+    # This is the plugin. Its not needed anymore, but for giving nagios some output
+    unless ($pid == 0) {
+
+        if ($error) {
+            secureNagiosExit(CRITICAL, $error);
+        }
+
+        secureNagiosExit(WARNING, 'Started check ESX daemon. This is normal behaviour'
+                                . ' on startup but indicates an error when occuring more often.');
+    }
+    
+    # This is the 1st daemon process. It becomes session leader now
+    unless (POSIX::setsid()) {
+        exitErrLog('ERROR: Unable to setsid, quitting');
+    } 
+
+    $pid = fork();
+    unless (defined $pid) {
+        exitErrLog('ERROR: Unable to fork the second time, quitting');
+    }
+
+    # This is the 1st daemon, and session leader. 
+    unless ($pid == 0) {
+        exit 0;
+    }
+    
+    # This is the 2nd daemon process, work begins
+    unless (writePid($pidFile)) {
+        exitErrLog("ERROR: Unable to write PID to PID-file: $pidFile");
+    } 
+
+    # suspend alarm, because the daemon has its own
+    alarm 0;
+
+    # redirecting STDOUT and -ERR to /dev/null
+    open STDOUT, '>', '/dev/null' or syslogThis('ERROR: Unable to redirect STDOUT to /dev/null');
+    open STDERR, '>', '/dev/null' or syslogThis('ERROR: Unable to redirect STDERR to /dev/null');
+    open STDIN,  '<', '/dev/null' or syslogThis('ERROR: Unable to redirect STDIN to /dev/null');
+
+    # daemon needs other SIGALRM handling than the plugin:
+    $SIG{ALRM} = sub {
+        exitErrLog("ERROR: Unable to get data from host $host in appropriate time ($queryTimeout seconds)");
+    };
+
+    setTimer($ttl);
+    syslogThis("Check ESX daemon for host $host started");
+    my $parentDaemonPid = $$;
+
+    # daemon loop
+    while ($runUntil > time) {
+
+        # removing all refs to the statusCache object for object destruction
+        $statusCache = undef;
+    
+        # if perfManager gets not set to undef, perl or VIM-API does not 
+        # propperly create new permanagers 
+        $perfManager = undef;
+
+        checkMyPid(2); 
+
+        # forking to get a check process
+        $checkProcId = fork();
+        unless (defined $checkProcId) {
+            daemonErrExit('ERROR: Unable to fork for host checking');
+        }
+
+
+        # This is the check process
+        if ($checkProcId == 0) {
+
+            syslogThis("Querying host $host for information");
+
+            $SIG{HUP} = 'DEFAULT';
+            my $queryStart = time;
+
+            alarm  $queryTimeout;
+            eval {
+                Util::connect("https://$host/sdk/webService",
+                               $np->opts->user, $np->opts->passwd);
+            };
+            if ($@) {
+                exitErrLog("ERROR: Unable to connect to host $host $@");
+            }
+    
+            $perfManager = Vim::get_view(mo_ref => Vim::get_service_content()->perfManager);
+            unless ($perfManager) {
+                exitErrLog("ERROR: Unable to retrieve performance manager from host $host");
+            }
+       
+            eval { 
+                # quering data from esx hosts can last long, but not too long 
+                getAllPerfCountIds($perfManager, \%perfCounterInfo);
+                getAllPerfCountVals($perfManager, $host);
+                getAllHostStates($host);
+                Util::disconnect();
+                alarm 0;
+            };
+            if ($@) {
+                exitErrLog("Unable to gather information from host $host: $@");
+            }
+ 
+            syslogThis("All status information from host $host received");
+            $daemonInfo{queryDuration} = time - $queryStart;
+    
+            # creating a new statusCache object
+            $statusCache = Shd::StatusCache->new($PLUGNAME, $host, $servDesc);
+            $statusCache->setDaemon();
+            $statusCache->lockAll();
+            if (defined $statusCache->{error}) {
+                exitErrLog('Unable to lock cache');
+            }
+    
+            # writing
+            $statusCache->setCache(\%cacheRefs);
+            if (defined $statusCache->{error}) {
+                exitErrLog('Unable to write status data into cache: ' . $statusCache->{error});
+            }
+            
+            # at first the cache-lock is remmoved, otherwise the plugin would remove
+            # the lock from the cache (both, plugin and daemon hold a cache lock after fork)
+            $statusCache->unlockAll();
+            if (defined $statusCache->{error}) {
+                exitErrLog('Unable to unlock cache');
+            }
+           
+            # resets previous error msgs 
+            if ($error) {
+                $statusCache->resetError();
+            }
+
+            # removing all refs to the statusCache object for object destruction
+            $statusCache = undef;
+    
+            # if perfManager gets not set to undef, perl or VIM-API does not 
+            # propperly create new permanagers 
+            $perfManager = undef;
+
+
+            # end of check process
+            exit 0;
+        }
+
+
+        ### this is the daemon
+
+        my $childReturned = 0; 
+        my $deadChildId = wait;
+
+        if ($deadChildId == $checkProcId) {
+             $childReturned = 1;
+        }
+        $deadChildId = undef;
+
+        # sleep does not sleep as many seconds as it was told to,
+        # if running in an ESX virtual machine. therefore the daemon is 
+        # send to sleep until the time it should sleep is reached.
+        my $slept = 0;
+
+        while ($slept < $daemonInterval) {
+            # this is done because its not nice to wait all $daemonInterval
+            # for the daemon to exit, if some signals were sent
+            if ($runUntil > time) {
+                checkMyPid(); 
+                $deadChildId = wait;
+                if (defined $deadChildId) {
+                    if ($deadChildId == $checkProcId) {
+                        $childReturned = 1;
+                    }
+                } 
+                $slept += sleep 5;
+            } else {
+                daemonExit();
+            }
+
+        }
+    
+        # this takes care of possible still exiting childs
+        unless ($childReturned) {
+            daemonErrExit('ERROR: Child did not return, maybe it took too long '
+                        . "to query host $host. A solution could be raising --checkInterval|i."
+                        . " Expected PID: $checkProcId");
+        }
+    }
+    syslogThis('Debug: lala');
+    daemonExit();
+}
+
+
+sub setCacheError {
+    my $msg = shift;
+    $statusCache = Shd::StatusCache->new($PLUGNAME, $host, $servDesc);
+    $statusCache->setDaemon();
+    $statusCache->setError($msg);
+    $statusCache = undef;
+}
+
+
+sub exitErrLog {
+    my $msg = shift;
+    syslogThis($msg);
+    setCacheError($msg);
+    exit 1;
+}
+
+sub daemonExit {
+    rmPidFile();
+    syslogThis('Timer exceeded, quitting');
+    exit 0;
+}
+
+sub daemonErrExit {
+    my $msg = shift;
+    my $output;
+
+    if (defined $msg) {
+        $output = $msg;
+    } else {
+        $output = 'Exiting due to error';
+    }
+
+    if (defined $statusCache) {
+        if (defined $statusCache->{error}) {
+            syslogThis($statusCache->{error});
+        }
+        $statusCache->unlockAll();
+    }
+    
+    rmPidFile();
+    exitErrLog($output);
+}
+
+
+# Disconnects, removes all locks and exits nagios conform.
+# Due to the fact that ESX hosts that run tight on memory ressources
+# can crash due to a unclean session handling, this is necessary.
+# @param: 1st exit state
+#         2nd nagios output
+sub secureNagiosExit {
+    my $state  = shift;
+    my $output = shift;
+    Util::disconnect();
+    if (defined $statusCache) {
+       $statusCache->unlockAll();
+    }
+    $np->nagios_exit($state, $output);
+}
+
+
+sub killChild {
+    unless ($checkProcId == 0) {
+        if (isCheckDaemon($checkProcId)) {
+            unless (kill HUP => $checkProcId) {
+                syslogThis('Unable to kill process with PID ' . $checkProcId);
+            } else {
+                syslogThis('Killed child ' . $checkProcId);
+            }
+        }
+    }
+}
+
+
+# check if the PID in the PID file is really the PID of this daemon
+# this is for preventing race conditions that possibly could occur
+# because the file-sys operations for creating and reading from the
+# PID file are not atomic.
+sub checkMyPid { 
+    my $sleep = shift;
+
+    if (defined $sleep and $sleep =~ /\d/) {
+        sleep $sleep;
+    }
+
+    unless (getPidFromFile($pidFile) == $$) {
+        syslogThis('PID in PID-file is not mine. Quitting. As long as one daemon for host ' . $host 
+                    . ' reamins this is normal behaviour. If no process is left for checking this host, this is an error'
+                    . ' that might be a hint at a PID file (' . $pidFile . ') corruption.');
+        exit 1;
+    }
+}
