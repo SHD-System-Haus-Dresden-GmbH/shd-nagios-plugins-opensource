@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.19) 5; urgency=low
+
+  * fixed dirs
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Tue, 23 Sep 2014 10:41:31 +0200
+
 shd-nagios-plugins-opensource (0.18) 5; urgency=low
 
   * fixed installation directory for plugins (compatibility)
