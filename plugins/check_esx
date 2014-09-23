@@ -941,14 +941,16 @@ sub evalListsAndExit {
     if (scalar(@critList) > 0) {
         setResult(CRITICAL);
         unless (defined $outStr) {
-            $outStr = 'Critical are: ';
+            $outStr = "\nCritical are:\n ";
         } else {
-            $outStr .= '; Critical are: ';
+            $outStr .= "Critical are:\n";
         }
         foreach (@critList) {
             $instName = $_;
-            $outStr .= $_ . ', ';
+            $outStr .= $_ . ",\n";
         } 
+        $outStr =~ s/Critical:/Critical:\n/ig;
+        $outStr =~ tr/,/\n/;
         chop $outStr;
         chop $outStr;
     }
@@ -956,14 +958,16 @@ sub evalListsAndExit {
     if (scalar(@warnList) > 0) {
         setResult(WARNING);
         unless (defined $outStr) {
-            $outStr = 'Warning are: ';
+            $outStr = "\nWarning are:\n ";
         } else {
-            $outStr .= '; Warning are: ';
+            $outStr .= "Warning are:\n";
         }
         foreach (@warnList) {
             $instName = $_;
-            $outStr .= $_ . ', ';
+            $outStr .= $_ . ",\n";
         } 
+        $outStr =~ s/Warning:/Warning:\n/ig;
+        $outStr =~ tr/,/\n/;
         chop $outStr;
         chop $outStr;
     }
@@ -971,23 +975,25 @@ sub evalListsAndExit {
     if (scalar(@okList) > 0) {
         setResult(OK);
 
-        if (defined $ressource and $ressource eq 'sensor') {
-            $outStr .= "No problems reported for remaining sensors.";
-        } elsif (defined $ressource and $ressource eq 'mpath') {
-            $outStr .= "No problems reported for remaining mpaths.";
-        } else {
+        #if (defined $ressource and $ressource eq 'sensor') {
+        #    $outStr .= "No problems reported for remaining sensors.";
+        #} elsif (defined $ressource and $ressource eq 'mpath') {
+        #    $outStr .= "No problems reported for remaining mpaths.";
+        #} else {
             unless (defined $outStr) {
-                $outStr = 'Ok are: ';
+                $outStr = "\nOk are:\n ";
             } else {
-                $outStr .= '; Ok are: ';
+                $outStr .= "Ok are:\n";
             }
             foreach (@okList) {
                 $instName = $_;
-                $outStr .= $_ . ', ';
-            } 
+                $outStr .= $_ . ",\n";
+            }
+        $outStr =~ s/Ok:/Ok:\n/ig;
+        $outStr =~ tr/,/\n/; 
             chop $outStr;
             chop $outStr;
-        }
+        #}
     }
 
     $np->nagios_exit($finalResult, $label . ' ' . $outStr);

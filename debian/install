@@ -1,1 +1,1 @@
-plugins/* usr/lib/nagios/plugins
+plugins/* usr/lib/nagios/plugins/shd

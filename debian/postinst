@@ -1,5 +1,7 @@
 #!/bin/sh -e
 
+
+
 #templdir=/usr/share/nagios-plugins/templates-shd
 #npconfdir=/etc/nagios-plugins/config
 

@@ -39,7 +39,7 @@ def build_value_dict(oid, host, community, snmp_version='1'):
     ph.close()
     return dict
 
-def build_index_dict(oid, host, community):
+def build_index_dict(oid, host, community, snmp_version='1'):
     """Build a value dict that uses the snmp index as key and value."""
     snmp_result = build_value_dict(oid, host, community)
     index_dict = {}

@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.17) 5; urgency=low
+
+  * fixed install
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Tue, 26 Aug 2014 16:04:47 +0200
+
 shd-nagios-plugins-opensource (0.16) 5; urgency=low
 
   * renaming probs solved
