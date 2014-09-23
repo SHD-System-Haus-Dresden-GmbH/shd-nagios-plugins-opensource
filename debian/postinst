@@ -1,6 +1,9 @@
 #!/bin/sh -e
 
-
+ln -s /usr/lib/nagios/plugins/check_esx /usr/lib/nagios/plugins/shd/check_esx
+ln -s /usr/lib/nagios/plugins/check_snmp_bulk /usr/lib/nagios/plugins/shd/check_snmp_bulk
+ln -s /usr/lib/nagios/plugins/check_top /usr/lib/nagios/plugins/shd/check_top
+ln -s /usr/lib/nagios/plugins/check_xen.py /usr/lib/nagios/plugins/shd/check_xen.py
 
 #templdir=/usr/share/nagios-plugins/templates-shd
 #npconfdir=/etc/nagios-plugins/config
