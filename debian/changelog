@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.21) 5; urgency=low
+
+  * fixed postinst script
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Fri, 13 Mar 2015 13:00:21 +0100
+
 shd-nagios-plugins-opensource (0.20) 5; urgency=low
 
   * fixed bug in lib 
