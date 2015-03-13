@@ -26,7 +26,7 @@ use Shd::StatusCache;
 # to pitch all that stuff to its own directory where it will 
 # not harm anything else:
 use lib "/usr/lib/shd-libvmware-perl";
-use lib "/usr/lib/shd-libvmware-perl-new";
+# use lib "/usr/lib/shd-libvmware-perl-new";
 use VMware::VIRuntime;
 
 my $PLUGNAME = basename($0);
