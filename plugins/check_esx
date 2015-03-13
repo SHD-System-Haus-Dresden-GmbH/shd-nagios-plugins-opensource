@@ -26,6 +26,7 @@ use Shd::StatusCache;
 # to pitch all that stuff to its own directory where it will 
 # not harm anything else:
 use lib "/usr/lib/shd-libvmware-perl";
+use lib "/usr/lib/shd-libvmware-perl-new";
 use VMware::VIRuntime;
 
 my $PLUGNAME = basename($0);
@@ -1317,7 +1318,9 @@ sub checkSensor {
     foreach my $_sensor (keys %{$hostStates{$_host}->{sensors}}) {
         $sensorList .= "[$_sensor] ";
         if (defined $_name and $_name ne '') {
-            next unless ($_sensor =~ /$_name/);
+            print $_sensor;
+			print $_name;
+			next unless ($_sensor =~ /$_name/);
         }
 
         $resState = $hostStates{$_host}->{sensors}->{$_sensor}->{state};
