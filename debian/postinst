@@ -5,7 +5,7 @@ pluginpath='/usr/lib/nagios/plugins'
 if [ ! -f $pluginpath/shd/check_esx ]; then
   ln -s $pluginpath/check_esx $pluginpath/shd/check_esx
 fi
-if [ ! -f $pluginpath/shd/snmp_bulk ]; then
+if [ ! -f $pluginpath/shd/check_snmp_bulk ]; then
   ln -s $pluginpath/check_snmp_bulk $pluginpath/shd/check_snmp_bulk
 fi
 if [ ! -f $pluginpath/shd/check_top ]; then
