@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.20) 5; urgency=low
+
+  * fixed bug in lib 
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Fri, 13 Mar 2015 11:25:57 +0100
+
 shd-nagios-plugins-opensource (0.19) 5; urgency=low
 
   * fixed dirs
