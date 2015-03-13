@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.23) 5; urgency=low
+
+  * fixed include path
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Fri, 13 Mar 2015 16:22:06 +0100
+
 shd-nagios-plugins-opensource (0.22) 5; urgency=low
 
   * fixed postinst
