@@ -1318,8 +1318,8 @@ sub checkSensor {
     foreach my $_sensor (keys %{$hostStates{$_host}->{sensors}}) {
         $sensorList .= "[$_sensor] ";
         if (defined $_name and $_name ne '') {
-            print $_sensor;
-			print $_name;
+            #print $_sensor;
+			#print $_name;
 			next unless ($_sensor =~ /$_name/);
         }
 
