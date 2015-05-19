@@ -1,3 +1,9 @@
+shd-nagios-plugins-opensource (0.24) 5; urgency=low
+
+  * bugfix: removed debug output in check_esx 
+
+ -- Stefan Kauerauf <stefan.kauerauf@shd-online.de>  Tue, 19 May 2015 11:04:32 +0200
+
 shd-nagios-plugins-opensource (0.23) 5; urgency=low
 
   * fixed include path
