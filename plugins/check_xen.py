@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#! /usr/bin/python
 # coding: utf-8
 
 # check_xen_shd.py (tm) - An Open Source Nagios Plugin for
@@ -176,18 +176,17 @@ class XenSession(object):
         self.password = password
 
     def login(self):
-        try:
-            # print self.session.last_login_method  # session debug
-            self.session = XenAPI.Session('https://' + self.host)
-        except XenAPI.Failure:
-            raise ServerError('Server "{0}" not reachable'.format(self.host))
-
-        try:
-            self.session.login_with_password(self.user,
-                                             self.password)  # get session id
-
-        except XenAPI.Failure:
-            raise LoginError('Credentials for user "{0}"wrong'.format(self.user))
+	    # If we try to login on a cluster slave, we redirect the session to the master
+    	try:
+            self.session = XenAPI.Session("https://"+self.host)
+            self.session.login_with_password(self.user, self.password)
+    	except XenAPI.Failure, e:
+            if e.details[0] == "HOST_IS_SLAVE":
+                self.session=XenAPI.Session('https://'+e.details[1])
+                self.session.login_with_password(self.user, self.password)
+            else:
+                raise ServerError('Server "{0}" not reachable or credentials wrong'.format(self.host))                        
+            
         except xmlrpclib.ResponseError:
             raise ServerError('Server sent wrong response. '
                               'Check if XenServer is running and reachable under that address.')
